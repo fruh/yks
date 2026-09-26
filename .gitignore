@@ -1,0 +1,10 @@
+# build output
+/yks
+/yks-*
+/dist/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
