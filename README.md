@@ -11,7 +11,6 @@
 - Master key cached in RAM only by a self-starting background agent, with a timeout
 - Runs on Linux and macOS
 - Clipboard copy that clears itself automatically
-- A single static Go binary, about 600 lines of code
 
 ---
 
