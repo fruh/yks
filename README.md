@@ -393,6 +393,7 @@ $ yks check
 | clipboard | no clipboard tool (only `c` is affected) | warn |
 | agent | the socket folder is insecure (caching is disabled) | warn |
 | git | `YKS_GIT=1` is set but the store is not a git repository, or git is not installed | warn |
+| clutter | hidden files or folders other than `.config`, `.gitignore` and `.git` are in the store (for example macOS `._*` files) | warn |
 
 `ykman` only reports whether a slot is *programmed*, not whether it holds a challenge-response credential. A slot holding Yubico OTP passes `check`, but decryption then fails with `ykman otp calculate failed`.
 
@@ -511,7 +512,7 @@ Entry names:
 
 - may contain `/` to create folders (`work/aws/root`)
 - may be given with or without the `.yks` suffix
-- must not be absolute or start with `.`, and must not escape the store with `..`
+- must not be absolute, no part of them may start with `.` (`work/.x` is refused too; see [Hidden files are ignored](#hidden-files-are-ignored)), and they must not escape the store with `..`
 
 ---
 
@@ -553,7 +554,7 @@ What happens:
 
 1. You always type the current master password, even if it is cached: the cache holds only derived keys, and a new salt needs the password itself. If some entries use a different password, `rekey` asks for it when it reaches the first such entry (up to 3 attempts) and remembers it for the rest of the run. Every password that has worked is tried on each later entry, one YubiKey operation each. At the end, all entries use the same (new or current) password.
 2. A fresh store salt is generated every time.
-3. Everything that is not an entry (`.git`, other files) is copied into a new directory next to the store, for example `~/.ykstore.rekey-123456`.
+3. Everything that is not an entry (`.git`, other files) is copied into a new directory next to the store, for example `~/.ykstore.rekey-123456`. macOS `._*` and `.DS_Store` files and `.tmp-*` leftovers are not copied.
 4. Each entry is decrypted, re-encrypted into the new directory, then read back from disk and checked against the original plaintext.
 5. Only when **every** entry has succeeded is the old store renamed to `~/.ykstore.bak-<date>-<time>` and the new one moved into its place. Any earlier failure leaves your store untouched and deletes the temporary directory.
 6. The cache agent is restarted with the new key.
@@ -606,6 +607,32 @@ salt=5f1c…(32 hex chars)
 Every `.yks` file contains its own copy of these parameters in its header. Each file can therefore be decrypted on its own, and `.config` only supplies defaults for **new** entries. Editing `.config` by hand affects only entries written afterwards; use [`yks rekey`](#re-encrypting-the-store-rekey) to change settings for existing entries.
 
 All writes are atomic: the tool writes a temporary file, syncs it to disk, then renames it. An interrupted write never leaves a half-written entry.
+
+### Hidden files are ignored
+
+Any file or folder whose name starts with `.` is **not** an entry. `ls`, the pick list, `check` and `rekey` skip it, wherever it is in the store. This covers:
+
+| File | Where it comes from |
+|---|---|
+| `._name` | macOS "AppleDouble" metadata, written when copying to FAT32/exFAT drives |
+| `.DS_Store` | macOS Finder folder settings |
+| `.tmp-*` | a `yks` write that was interrupted |
+| `.git/` | git, if you use it for history |
+| `.swp` and similar | editors |
+
+`yks check` lists hidden clutter so it does not go unnoticed:
+
+```
+[warn] clutter    12 hidden files/folders ignored (e.g. ._.config, ._github, github/._personal.yks); review, then delete, …
+```
+
+AppleDouble files contain only macOS metadata, not file contents, so they are safe to delete:
+
+```sh
+find ~/.ykstore \( -name '._*' -o -name .DS_Store \) -print -delete
+```
+
+To avoid creating them when copying from a Mac, run `dot_clean /Volumes/<drive>` before ejecting the drive, or strip the metadata first with `xattr -cr ~/.ykstore`. `yks rekey` also leaves `._*`, `.DS_Store` and `.tmp-*` files behind when it builds the new store.
 
 ### History with git
 
@@ -876,6 +903,7 @@ If a YubiKey or the HMAC secret backup may have been compromised, program a fres
 | `refusing to store an empty secret` | The input to `e` was empty or only whitespace, often because the command feeding the pipe failed. Nothing was written. |
 | `git auto-commit skipped: …` | `YKS_GIT=1` is set but the store is not a git repository, git is missing, or the commit failed (for example, commit signing failed). The entry itself was saved. |
 | `no store config, run 'yks init'` | The store does not exist yet, or `YKS_DIR` points somewhere else. |
+| Files named `._something` appeared after copying from a Mac | macOS metadata files. `yks` ignores them; delete them with the `find` command in [Hidden files are ignored](#hidden-files-are-ignored). |
 | `unknown flag -x` | A mistyped flag. If `-x` really is the start of an entry name, put `--` before it: `yks d -- -x`. |
 
 ---

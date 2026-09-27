@@ -301,6 +301,13 @@ func copyNonEntries(src, dst string) error {
 		if rel == ".config" || (!inGit && strings.HasSuffix(rel, ".yks") && !d.IsDir()) {
 			return nil
 		}
+		// Leave macOS metadata and interrupted-write leftovers behind.
+		if !inGit && (strings.HasPrefix(d.Name(), "._") || d.Name() == ".DS_Store" || strings.HasPrefix(d.Name(), ".tmp-")) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		target := filepath.Join(dst, rel)
 		info, err := d.Info()
 		if err != nil {

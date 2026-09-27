@@ -357,12 +357,25 @@ func loadConfig() (*config, error) {
 // entry returns the canonical name (bound into the ciphertext) and file path.
 func entry(name string) (string, string, error) {
 	n := filepath.ToSlash(filepath.Clean(strings.TrimSuffix(name, ".yks")))
-	if n == "" || filepath.IsAbs(n) || strings.HasPrefix(n, ".") {
-		return "", "", fmt.Errorf("invalid entry name %q", name)
+	if n == "" || filepath.IsAbs(n) || hiddenPath(n) {
+		return "", "", fmt.Errorf("invalid entry name %q (no part may start with '.')", name)
 	}
 	return n, filepath.Join(storeDir(), filepath.FromSlash(n)+".yks"), nil
 }
 
+// hiddenPath reports whether any part of a slash-separated path starts with
+// ".". Such files are never entries: this covers ".git", macOS AppleDouble
+// files ("._name"), ".DS_Store", editor swap files and ".tmp-*" leftovers.
+func hiddenPath(rel string) bool {
+	for _, part := range strings.Split(rel, "/") {
+		if strings.HasPrefix(part, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+// listEntries returns all entry names, sorted. Hidden files and folders are skipped.
 func listEntries() ([]string, error) {
 	root := storeDir()
 	var names []string
@@ -370,8 +383,14 @@ func listEntries() ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && d.Name() == ".git" {
-			return filepath.SkipDir
+		if p == root {
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if !d.IsDir() && strings.HasSuffix(p, ".yks") {
 			rel, _ := filepath.Rel(root, p)
@@ -380,6 +399,35 @@ func listEntries() ([]string, error) {
 		return nil
 	})
 	return names, err // WalkDir visits in lexical order, so the list is sorted
+}
+
+// listClutter returns hidden files and folders in the store other than the
+// ones yks or git put there (.config, .gitignore, .git).
+func listClutter() []string {
+	root := storeDir()
+	var junk []string
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == root {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, p)
+		rel = filepath.ToSlash(rel)
+		if !strings.HasPrefix(d.Name(), ".") {
+			return nil
+		}
+		switch rel {
+		case ".git":
+			return filepath.SkipDir
+		case ".config", ".gitignore":
+			return nil
+		}
+		junk = append(junk, rel)
+		if d.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return junk
 }
 
 func cmdList() error {
@@ -1035,6 +1083,11 @@ func cmdCheck() error {
 			default:
 				report("ok", "entries", fmt.Sprintf("%d, all at current settings", len(names)))
 			}
+		}
+		if junk := listClutter(); len(junk) > 0 {
+			ex := strings.Join(junk[:min(3, len(junk))], ", ")
+			report("warn", "clutter", fmt.Sprintf("%d hidden files/folders ignored (e.g. %s); review, then delete, e.g.: find %q \\( -name '._*' -o -name .DS_Store \\) -delete",
+				len(junk), ex, storeDir()))
 		}
 		for _, l := range strings.Split(otpInfo, "\n") {
 			if strings.HasPrefix(l, fmt.Sprintf("Slot %d:", c.Slot)) && strings.Contains(l, "empty") {
