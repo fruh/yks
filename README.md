@@ -164,6 +164,7 @@ go mod tidy       # first time without go.sum, or after changing imports; create
 **4. Check the code (optional, the same checks CI runs)**
 
 ```sh
+gofmt -w .
 gofmt -l .        # prints files that need formatting; fix with: gofmt -w .
 go vet ./...
 ```

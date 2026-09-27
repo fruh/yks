@@ -3,11 +3,12 @@
 // yks - minimal YubiKey HMAC-SHA1 challenge-response secret store.
 //
 // Key derivation per entry:
-//   pk        = Argon2id(master_password, store_salt)          (cached by the in-memory agent)
-//   challenge = HMAC-SHA256(pk, "yks-v1 challenge" || seed)     (seed: 32 random bytes per file)
-//   resp      = YubiKey_HMAC_SHA1(slot, challenge)
-//   key       = HKDF-SHA256(ikm = resp || pk, salt = seed, info = "yks-v1 aes-256-gcm")
-//   file      = header || AES-256-GCM(key, nonce, plaintext, aad = header || 0x00 || name)
+//
+//	pk        = Argon2id(master_password, store_salt)          (cached by the in-memory agent)
+//	challenge = HMAC-SHA256(pk, "yks-v1 challenge" || seed)     (seed: 32 random bytes per file)
+//	resp      = YubiKey_HMAC_SHA1(slot, challenge)
+//	key       = HKDF-SHA256(ikm = resp || pk, salt = seed, info = "yks-v1 aes-256-gcm")
+//	file      = header || AES-256-GCM(key, nonce, plaintext, aad = header || 0x00 || name)
 //
 // Both factors are needed: the YubiKey response alone is not the key, and the
 // password alone is useless without the YubiKey.
