@@ -1,6 +1,6 @@
 # yks — YubiKey-backed secret store
 
-[![ci](https://github.com/fruh/yks/actions/workflows/ci.yml/badge.svg)](https://github.com/fruh/yks/actions/workflows/ci.yml)
+[![ci](https://github.com/YOUR_GITHUB_USER/yks/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB_USER/yks/actions/workflows/ci.yml)
 
 `yks` is a small command-line tool that encrypts secrets and files with a key derived from **two factors**: an optional master password and a YubiKey HMAC-SHA1 challenge-response slot. It stores entries as individual encrypted files in a directory, similar to [`pass`](https://www.passwordstore.org/), without needing GPG.
 
@@ -11,6 +11,7 @@
 - Master key cached in RAM only by a self-starting background agent, with a timeout
 - Runs on Linux and macOS
 - Clipboard copy that clears itself automatically
+- A single static Go binary, about 600 lines of code
 
 ---
 
@@ -64,7 +65,7 @@ brew install ykman
 ### With `go install` (recommended)
 
 ```sh
-go install github.com/fruh/yks@latest
+go install github.com/YOUR_GITHUB_USER/yks@latest
 ```
 
 This builds the binary and places it in `$(go env GOPATH)/bin`, usually `~/go/bin`. Make sure that folder is on your `PATH`:
@@ -74,20 +75,20 @@ export PATH="$PATH:$(go env GOPATH)/bin"     # add to ~/.zshrc or ~/.bashrc
 yks version
 ```
 
-To install a specific release instead of the latest, use its tag: `go install github.com/fruh/yks@v0.1.0`. Run the same command again to upgrade.
+To install a specific release instead of the latest, use its tag: `go install github.com/YOUR_GITHUB_USER/yks@v0.1.0`. Run the same command again to upgrade.
 
 Only Linux and macOS are supported. On other systems the build fails with `build constraints exclude all Go files`.
 
 ### From source
 
 ```sh
-git clone https://github.com/fruh/yks.git
+git clone https://github.com/YOUR_GITHUB_USER/yks.git
 cd yks
 go build -o yks .
 sudo install -m 0755 yks /usr/local/bin/
 ```
 
-A plain `go build` is all you need. The optional flags below produce a smaller, cleaner binary and are recommended for the copy you actually install.
+A plain `go build` is all you need. The optional flags below produce a smaller, cleaner binary and are recommended for the copy you actually install. For a detailed walkthrough, see [Local build, step by step](#local-build-step-by-step).
 
 ### Optional build flags
 
@@ -119,8 +120,8 @@ On macOS this makes no difference, so leave it out there.
 **The same flags with `go install`:**
 
 ```sh
-go install -trimpath -ldflags="-s -w" github.com/fruh/yks@latest
-CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" github.com/fruh/yks@latest   # Linux, static
+go install -trimpath -ldflags="-s -w" github.com/YOUR_GITHUB_USER/yks@latest
+CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" github.com/YOUR_GITHUB_USER/yks@latest   # Linux, static
 ```
 
 Without the flags, `go install` still works. The binary then contains paths from Go's module cache (`~/go/pkg/mod/...`) rather than your own project folder.
@@ -132,7 +133,109 @@ Without the flags, `go install` still works. The binary then contains paths from
 | Changing the code | `go build -o yks .` |
 | Installing on your machine | `go build -trimpath -ldflags="-s -w" -o yks .` |
 | Copying to other Linux machines | `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o yks .` |
-| Installing from GitHub | `go install -trimpath -ldflags="-s -w" github.com/fruh/yks@latest` |
+| Installing from GitHub | `go install -trimpath -ldflags="-s -w" github.com/YOUR_GITHUB_USER/yks@latest` |
+
+### Local build, step by step
+
+Use this to build from a local copy, for example to try changes before pushing, or on a machine without access to GitHub.
+
+**1. Check the prerequisites**
+
+```sh
+go version        # needs go1.22 or newer
+ykman --version   # YubiKey Manager, see Requirements
+```
+
+**2. Get the source**
+
+```sh
+git clone https://github.com/YOUR_GITHUB_USER/yks.git && cd yks
+# or, from an archive:
+unzip yks.zip && cd yks
+```
+
+**3. Download the dependencies**
+
+```sh
+go mod download   # when go.sum is present (a normal clone)
+go mod tidy       # first time without go.sum, or after changing imports; creates/updates go.sum
+```
+
+**4. Check the code (optional, the same checks CI runs)**
+
+```sh
+gofmt -l .        # prints files that need formatting; fix with: gofmt -w .
+go vet ./...
+```
+
+**5. Build**
+
+```sh
+go build -o yks .                  # development build
+./yks version                      # prints (devel)
+```
+
+For the binary you install, prefer the release build from [Optional build flags](#optional-build-flags).
+
+**6. Try it without touching your real store**
+
+`YKS_DIR` points `yks` at a throwaway store. It uses your real YubiKey, but only reads from it:
+
+```sh
+export YKS_DIR="$(mktemp -d)/store"
+./yks check
+./yks init -m 64                   # small Argon2 setting keeps testing fast
+echo "hello" | ./yks e test/hello
+./yks d test/hello
+./yks rm -f test/hello
+
+# clean up
+./yks forget                       # note: also clears keys cached for your real store
+rm -rf "$(dirname "$YKS_DIR")"
+unset YKS_DIR
+```
+
+**7. Install**
+
+Pick one:
+
+```sh
+sudo install -m 0755 yks /usr/local/bin/yks    # system-wide
+install -m 0755 yks ~/.local/bin/yks           # just for you, no sudo; ~/.local/bin must be on PATH
+go install .                                   # into $(go env GOPATH)/bin, usually ~/go/bin
+```
+
+Then check it is the one found first on your `PATH`:
+
+```sh
+command -v yks && yks version
+```
+
+**8. Rebuild after changes**
+
+Repeat steps 5 and 7. Afterwards, run `yks forget` once: a cache agent started by the previous binary otherwise keeps running until its timeout.
+
+**Uninstall**
+
+```sh
+yks forget
+sudo rm /usr/local/bin/yks   # or ~/.local/bin/yks, or ~/go/bin/yks
+```
+
+Your store (`~/.ykstore`) is not touched.
+
+**Cross-compiling (optional)**
+
+You can build for another machine from either platform:
+
+```sh
+GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o yks-macos-arm64 .   # Apple silicon
+GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o yks-macos-intel .
+GOOS=linux  GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o yks-linux-amd64 .
+GOOS=linux  GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o yks-linux-arm64 .
+```
+
+If macOS refuses to run a binary copied from another machine, remove the quarantine flag: `xattr -d com.apple.quarantine yks-macos-arm64`.
 
 ### Verify
 
@@ -148,6 +251,7 @@ yks check
 | `main.go` | CLI, key derivation, encryption, storage, clipboard, dependency checks |
 | `agent.go` | in-memory password cache agent (client and server) |
 | `rekey.go` | `yks rekey`: re-encrypt, verify and swap the whole store |
+| `device.go` | choosing a YubiKey when several are connected |
 | `sys_linux.go` | peer-UID check and process hardening (Linux) |
 | `sys_darwin.go` | peer-UID check and process hardening (macOS) |
 | `go.mod`, `go.sum` | module definition and dependency checksums |
@@ -234,7 +338,7 @@ yks c github/personal -a
 | `ls` | Lists all entries. |
 | `forget` | Stops the cache agent immediately, wiping all cached keys. |
 | `check` | Checks dependencies, the YubiKey, the store and the agent, and reports what is missing. |
-| `rekey [-p] [-s 1\|2] [-d serial] [-m MiB] [-t N]` | Re-encrypts every entry with the current or new settings. See [Re-encrypting the store](#re-encrypting-the-store-rekey). |
+| `rekey [-p] [-s 1\|2] [-new-device SERIAL] [-m MiB] [-t N]` | Re-encrypts every entry with the current or new settings. See [Re-encrypting the store](#re-encrypting-the-store-rekey). |
 | `version` | Prints the version (the release tag when installed with `go install ...@vX.Y.Z`). |
 
 | Flag | Description |
@@ -242,6 +346,7 @@ yks c github/personal -a
 | `-s 1\|2` | YubiKey slot for a **new** entry (overrides the config default). Decryption always uses the slot recorded in the file. |
 | `-f` | Allows `e` to overwrite an existing entry; makes `rm` skip the confirmation. |
 | `-a` | Makes `c` copy the entire entry instead of the first line. Only valid with `c`. |
+| `-d SERIAL`, `--device SERIAL` | YubiKey to use when several are connected. See [Choosing a YubiKey](#choosing-a-yubikey). |
 
 ### Dependency checks
 
@@ -264,7 +369,8 @@ yks: missing dependencies (run 'yks check' for details):
 ```
 $ yks check
 [ok  ] ykman      YubiKey Manager (ykman) version: 5.5.1
-[ok  ] yubikey    Slot 1: programmed | Slot 2: programmed
+[ok  ] yubikey    YubiKey 5C NFC (5.4.3) [OTP+FIDO+CCID] Serial: 87654321
+[ok  ] otp        Slot 1: programmed | Slot 2: programmed
 [ok  ] clipboard  pbcopy
 [ok  ] store      /Users/alice/.ykstore (default slot 2)
 [ok  ] argon2     256 MiB, t=3, p=4
@@ -275,7 +381,9 @@ $ yks check
 | Check | Fails when | Level |
 |---|---|---|
 | ykman | not installed | FAIL |
-| yubikey | not plugged in, not readable, or several keys connected without `YKS_DEVICE` | FAIL |
+| yubikey | none plugged in, or `ykman list` fails | FAIL |
+| otp | the selected (or only) key's OTP application cannot be read | FAIL |
+| device | the default key (from `-d`, `YKS_DEVICE` or `.config`) is not connected, or several keys are connected with no default | warn |
 | slot | the default slot from `.config` is empty | FAIL |
 | store | `yks init` not run, or `.config` is invalid | FAIL |
 | entries | an entry's header cannot be read | FAIL |
@@ -286,6 +394,37 @@ $ yks check
 | git | `YKS_GIT=1` is set but the store is not a git repository, or git is not installed | warn |
 
 `ykman` only reports whether a slot is *programmed*, not whether it holds a challenge-response credential. A slot holding Yubico OTP passes `check`, but decryption then fails with `ykman otp calculate failed`.
+
+### Choosing a YubiKey
+
+With one YubiKey plugged in, `yks` simply uses it. With several (for example your main key and its backup), it picks one in this order:
+
+| Priority | Source | Example |
+|---|---|---|
+| 1 | `-d` / `--device` on the command line | `yks c github/personal -d 12345678` |
+| 2 | `YKS_DEVICE` environment variable | `export YKS_DEVICE=12345678` |
+| 3 | `device=` in the store's `.config` | `device=12345678` |
+| 4 | the only connected key | — |
+| 5 | **ask** | see below |
+
+If several keys are connected and no default is set, `yks` asks which one to use, once per command, before asking for the master password:
+
+```
+$ yks c
+1  github/personal
+2  test
+Entry [1-2, Enter to cancel]: 2
+Several YubiKeys are connected:
+1  YubiKey 5 NFC (5.1.2) [OTP+FIDO+CCID] Serial: 12345678
+2  YubiKey 5C NFC (5.4.3) [OTP+FIDO+CCID] Serial: 87654321
+YubiKey [1-2, Enter to cancel]: 1
+tip: skip this question with -d 12345678, YKS_DEVICE=12345678, or device=12345678 in ~/.ykstore/.config
+Master password for test:
+```
+
+To set a permanent default, add `device=<serial>` to `.config`, or pass `-d` to `yks init`. When you run `yks init` with several keys connected, it offers to set one as the default. Find the serials with `ykman list --serials`.
+
+If your backup key carries the **same** HMAC secret, either key opens every entry, so the choice only decides which one you tap.
 
 ### Copying to the clipboard
 
@@ -381,7 +520,7 @@ Entry names:
 |---|---|---|
 | `YKS_DIR` | `~/.ykstore` | Store location |
 | `YKS_CACHE_TTL` | `300` | Seconds to cache the master key; `0` turns caching off |
-| `YKS_DEVICE` | *(none)* | YubiKey serial to use when several are connected (see `ykman list --serials`) |
+| `YKS_DEVICE` | *(none)* | Default YubiKey serial when several are connected; overrides `device=` in `.config`, overridden by `-d` (see [Choosing a YubiKey](#choosing-a-yubikey)) |
 | `YKS_GIT` | *(off)* | `1` commits every change automatically if the store is a git repository (see [History with git](#history-with-git)) |
 
 ---
@@ -396,7 +535,7 @@ Entry names:
 | Raise the Argon2id cost | `yks rekey -m 512 -t 4` |
 | Change the master password | `yks rekey -p` |
 | Move to the other slot | `yks rekey -s 1` |
-| Move to a different YubiKey (both plugged in) | `YKS_DEVICE=<old serial> yks rekey -d <new serial>` |
+| Move to a different YubiKey (both plugged in) | `yks rekey -d <old serial> -new-device <new serial>` |
 
 Options can be combined, for example `yks rekey -p -m 512`.
 
@@ -404,7 +543,8 @@ Options can be combined, for example `yks rekey -p -m 512`.
 |---|---|
 | `-p` | Ask for a new master password (entered twice) |
 | `-s 1\|2` | Slot to encrypt with; also becomes the new default slot |
-| `-d serial` | YubiKey to encrypt with; decryption uses `YKS_DEVICE` or the only connected key |
+| `-new-device SERIAL` | YubiKey to encrypt with. If `.config` has a default `device=`, it moves to this key |
+| `-d SERIAL` | YubiKey to decrypt with (as for every command); without `-new-device`, also the one to encrypt with |
 | `-m MiB` | New Argon2id memory, 8–4096 MiB |
 | `-t N` | New Argon2id iterations, 1–20 |
 
@@ -460,6 +600,7 @@ salt=5f1c…(32 hex chars)
 | `argon_m` | Argon2id memory in KiB (262144 = 256 MiB) |
 | `argon_p` | Argon2id parallelism |
 | `salt` | Store-wide Argon2 salt (16 bytes) |
+| `device` | *(optional)* default YubiKey serial, used when several keys are connected |
 
 Every `.yks` file contains its own copy of these parameters in its header. Each file can therefore be decrypted on its own, and `.config` only supplies defaults for **new** entries. Editing `.config` by hand affects only entries written afterwards; use [`yks rekey`](#re-encrypting-the-store-rekey) to change settings for existing entries.
 
@@ -713,7 +854,7 @@ Recommended:
 
 To restore on a new machine, build `yks`, copy the store directory and plug in either YubiKey.
 
-If a YubiKey or the HMAC secret backup may have been compromised, program a fresh secret on a new key (or the other slot) and run `yks rekey -d <new serial>` (or `yks rekey -s <other slot>`), preferably with `-p` as well. Then delete the `.bak-*` directory it leaves behind.
+If a YubiKey or the HMAC secret backup may have been compromised, program a fresh secret on a new key (or the other slot) and run `yks rekey -d <old serial> -new-device <new serial>` (or `yks rekey -s <other slot>`), preferably with `-p` as well. Then delete the `.bak-*` directory it leaves behind.
 
 ---
 
@@ -724,7 +865,8 @@ If a YubiKey or the HMAC secret backup may have been compromised, program a fres
 | `ykman otp calculate failed` | The slot is not set up for challenge-response (`ykman otp info`), the key is not connected, or the touch timed out. |
 | `unexpected ykman output` | Old `ykman` version, or an extra prompt. Run the test command from [YubiKey setup](#yubikey-setup) manually. |
 | `decryption failed after 3 attempts: …` | Wrong password, a different YubiKey or secret, or the file was renamed or moved. Move it back to its original name, decrypt it, then re-encrypt it under the new name. |
-| Several YubiKeys connected | Set `YKS_DEVICE=<serial>`. |
+| Asked which YubiKey to use every time | Several keys are connected and no default is set. Add `device=<serial>` to `.config`, set `YKS_DEVICE`, or pass `-d`. See [Choosing a YubiKey](#choosing-a-yubikey). |
+| `several YubiKeys are connected but none reports a serial number` | Those keys do not report a serial number over USB, so `yks` cannot tell them apart. Unplug all but one. |
 | Asked for the password every time | `YKS_CACHE_TTL=0` is set, or the agent could not start: look for a `password cache unavailable` warning on stderr (for example, an insecure socket folder). |
 | `insecure agent directory` | The `yks-<uid>` folder has the wrong owner or mode. Check it, then run `rm -r` on it; it is recreated automatically. |
 | `no clipboard tool found` | Install `wl-clipboard` (Wayland) or `xclip` (X11). |

@@ -3,12 +3,11 @@
 // yks - minimal YubiKey HMAC-SHA1 challenge-response secret store.
 //
 // Key derivation per entry:
-//
-//	pk        = Argon2id(master_password, store_salt)          (cached by the in-memory agent)
-//	challenge = HMAC-SHA256(pk, "yks-v1 challenge" || seed)     (seed: 32 random bytes per file)
-//	resp      = YubiKey_HMAC_SHA1(slot, challenge)
-//	key       = HKDF-SHA256(ikm = resp || pk, salt = seed, info = "yks-v1 aes-256-gcm")
-//	file      = header || AES-256-GCM(key, nonce, plaintext, aad = header || 0x00 || name)
+//   pk        = Argon2id(master_password, store_salt)          (cached by the in-memory agent)
+//   challenge = HMAC-SHA256(pk, "yks-v1 challenge" || seed)     (seed: 32 random bytes per file)
+//   resp      = YubiKey_HMAC_SHA1(slot, challenge)
+//   key       = HKDF-SHA256(ikm = resp || pk, salt = seed, info = "yks-v1 aes-256-gcm")
+//   file      = header || AES-256-GCM(key, nonce, plaintext, aad = header || 0x00 || name)
 //
 // Both factors are needed: the YubiKey response alone is not the key, and the
 // password alone is useless without the YubiKey.
@@ -84,12 +83,13 @@ func (k kdf) cacheID() string {
 }
 
 type config struct {
-	Slot int
-	KDF  kdf
+	Slot   int
+	KDF    kdf
+	Device string // optional default YubiKey serial
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: yks <command> [args] [-s 1|2] [-f] [-a]
+	fmt.Fprint(os.Stderr, `usage: yks <command> [args] [-s 1|2] [-d SERIAL] [-f] [-a]
        (flags may go before or after the command; -- ends flags)
   init [-m MiB] [-t N]
                     create the store and choose a default slot
@@ -105,15 +105,17 @@ func usage() {
   forget            stop the cache agent, wiping cached keys
   check             check dependencies, YubiKey, store and agent
   version           print version
-  rekey [-p] [-s 1|2] [-d serial] [-m MiB] [-t N]
+  rekey [-p] [-s 1|2] [-new-device SERIAL] [-m MiB] [-t N]
                     re-encrypt every entry with the current (or new) settings:
-                    -p new master password, -s new slot, -d YubiKey serial to
-                    encrypt with, -m/-t new Argon2id settings
+                    -p new master password, -s new slot, -new-device YubiKey
+                    to encrypt with (-d picks the one to decrypt with),
+                    -m/-t new Argon2id settings
 flags: -s slot for new entries (default from config),
+       -d, --device SERIAL  YubiKey to use (see: ykman list --serials),
        -f overwrite on 'e', no confirmation on 'rm',
        -a copy the entire entry with 'c'
 env:   YKS_DIR (default ~/.ykstore), YKS_CACHE_TTL seconds (default 300, 0 = off),
-       YKS_DEVICE YubiKey serial (when several are connected),
+       YKS_DEVICE default YubiKey serial (also: device= in .config),
        YKS_GIT=1 commit changes automatically if the store is a git repository
 `)
 	os.Exit(2)
@@ -138,6 +140,8 @@ func main() {
 	slot := fl.Int("s", 0, "")
 	force := fl.Bool("f", false, "")
 	all := fl.Bool("a", false, "")
+	fl.StringVar(&flagDevice, "d", "", "")
+	fl.StringVar(&flagDevice, "device", "", "")
 	flags, a, literal, err := splitArgs(os.Args[1:])
 	if err != nil {
 		die(err)
@@ -160,6 +164,9 @@ func main() {
 	}
 	if *slot != 0 && *slot != 1 && *slot != 2 {
 		die(errors.New("slot must be 1 or 2"))
+	}
+	if flagDevice != "" && !validSerial(flagDevice) {
+		die(fmt.Errorf("invalid YubiKey serial %q (see: ykman list --serials)", flagDevice))
 	}
 	switch a[0] {
 	case "e", "d", "rekey":
@@ -213,7 +220,7 @@ func main() {
 	}
 }
 
-// splitArgs pulls the global flags (-s N, -f, -a, -h) out of args wherever
+// splitArgs pulls the global flags (-s N, -d SERIAL, -f, -a, -h) out of args wherever
 // they appear, so both "yks -a c name" and "yks c name -a" work. Everything
 // else keeps its order. "--" ends flag parsing; literal is the index in rest
 // from which arguments were given after "--" (len(rest) if there was none).
@@ -232,11 +239,11 @@ func splitArgs(args []string) (flags, rest []string, literal int, err error) {
 		switch name {
 		case "f", "a", "h", "help":
 			flags = append(flags, arg)
-		case "s":
+		case "s", "d", "device":
 			flags = append(flags, arg)
 			if !hasValue {
 				if i+1 >= len(args) {
-					return nil, nil, 0, errors.New("-s needs a value: 1 or 2")
+					return nil, nil, 0, fmt.Errorf("%s needs a value", arg)
 				}
 				i++
 				flags = append(flags, args[i])
@@ -264,8 +271,12 @@ func storeDir() string {
 func configPath() string { return filepath.Join(storeDir(), ".config") }
 
 func (c config) String() string {
-	return fmt.Sprintf("slot=%d\nargon_t=%d\nargon_m=%d\nargon_p=%d\nsalt=%x\n",
+	s := fmt.Sprintf("slot=%d\nargon_t=%d\nargon_m=%d\nargon_p=%d\nsalt=%x\n",
 		c.Slot, c.KDF.T, c.KDF.M, c.KDF.P, c.KDF.Salt)
+	if c.Device != "" {
+		s += "device=" + c.Device + "\n"
+	}
+	return s
 }
 
 // argonFromFlags turns -m (MiB) / -t values into KDF settings with a fresh salt.
@@ -302,12 +313,22 @@ func cmdInit(args []string, slot int) error {
 		}
 		slot, _ = strconv.Atoi(strings.TrimSpace(s))
 	}
-	c := config{Slot: slot, KDF: k}
+	c := config{Slot: slot, KDF: k, Device: flagDevice}
+	if c.Device == "" {
+		if keys, err := listYubiKeys(); err == nil && len(keys) > 1 {
+			if c.Device, err = pickYubiKey(keys, true); err != nil {
+				return err
+			}
+		}
+	}
 	if err := writeAtomic(configPath(), []byte(c.String())); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "initialised %s (default slot %d, Argon2id %d MiB, t=%d)\n",
 		storeDir(), slot, *mib, *iters)
+	if c.Device != "" {
+		fmt.Fprintf(os.Stderr, "default YubiKey: %s\n", c.Device)
+	}
 	return nil
 }
 
@@ -323,9 +344,10 @@ func loadConfig() (*config, error) {
 		}
 	}
 	num := func(k string) uint32 { n, _ := strconv.ParseUint(m[k], 10, 32); return uint32(n) }
-	c := &config{Slot: int(num("slot")), KDF: kdf{T: num("argon_t"), M: num("argon_m"), P: uint8(num("argon_p"))}}
+	c := &config{Slot: int(num("slot")), KDF: kdf{T: num("argon_t"), M: num("argon_m"), P: uint8(num("argon_p"))},
+		Device: m["device"]}
 	c.KDF.Salt, err = hex.DecodeString(m["salt"])
-	if err != nil || !c.KDF.valid() || (c.Slot != 1 && c.Slot != 2) {
+	if err != nil || !c.KDF.valid() || (c.Slot != 1 && c.Slot != 2) || (c.Device != "" && !validSerial(c.Device)) {
 		return nil, errors.New("invalid config " + configPath())
 	}
 	return c, nil
@@ -367,8 +389,7 @@ func cmdList() error {
 	return err
 }
 
-// pickEntry shows a numbered list on the terminal (not stdout, which may be
-// redirected) and asks for an index. Empty input or Ctrl-D cancels.
+// pickEntry asks which entry to use, from a numbered list.
 func pickEntry() (string, error) {
 	names, err := listEntries()
 	if err != nil {
@@ -377,28 +398,49 @@ func pickEntry() (string, error) {
 	if len(names) == 0 {
 		return "", errors.New("store is empty")
 	}
-	t, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	i, err := pickFrom("", names, "Entry", false)
 	if err != nil {
 		return "", err
 	}
+	return names[i], nil
+}
+
+// pickFrom shows a numbered list on the terminal (not stdout, which may be
+// redirected) and returns the chosen index. Empty input or Ctrl-D cancels,
+// or returns -1 when optional is set.
+func pickFrom(header string, items []string, what string, optional bool) (int, error) {
+	t, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return -1, err
+	}
 	defer t.Close()
-	w := len(strconv.Itoa(len(names)))
-	for i, n := range names {
+	if header != "" {
+		fmt.Fprintln(t, header)
+	}
+	w := len(strconv.Itoa(len(items)))
+	for i, n := range items {
 		fmt.Fprintf(t, "%*d  %s\n", w, i+1, n)
+	}
+	hint := ", Enter to cancel"
+	if optional {
+		hint = ""
 	}
 	r := bufio.NewReader(t)
 	for {
-		fmt.Fprintf(t, "Entry [1-%d, Enter to cancel]: ", len(names))
+		fmt.Fprintf(t, "%s [1-%d%s]: ", what, len(items), hint)
 		line, rerr := r.ReadString('\n')
 		line = strings.TrimSpace(line)
 		if line == "" {
 			if rerr != nil { // Ctrl-D: move off the prompt line
 				fmt.Fprintln(t)
 			}
-			return "", errors.New("cancelled")
+			if optional {
+				return -1, nil
+			}
+			return -1, errors.New("cancelled")
 		}
-		if i, err := strconv.Atoi(line); err == nil && i >= 1 && i <= len(names) {
-			return names[i-1], nil
+		if i, err := strconv.Atoi(line); err == nil && i >= 1 && i <= len(items) {
+			return i - 1, nil
 		}
 		fmt.Fprintln(t, "invalid choice")
 	}
@@ -479,6 +521,9 @@ func cmdEncrypt(name, in string, slot int, force bool) error {
 		return err
 	}
 	defer clear(data)
+	if _, err := device(); err != nil { // choose the key before the password prompt
+		return err
+	}
 	// Protects against e.g. `failing-cmd | yks -f e name` wiping an entry.
 	if len(bytes.TrimSpace(data)) == 0 {
 		return errors.New("refusing to store an empty secret (input was empty or whitespace only)")
@@ -548,6 +593,9 @@ func cmdDecrypt(name string, clip, all bool) error {
 	}
 	slot, k, seed, nonce, err := parseHeader(b)
 	if err != nil {
+		return err
+	}
+	if _, err := device(); err != nil { // choose the key before the password prompt
 		return err
 	}
 	pt, err := openWithRetry(canon, k, slot, seed, nonce, b[hdrLen:], aad(b[:hdrLen], canon))
@@ -650,6 +698,13 @@ func newAEAD(pk, seed []byte, slot int, dev string) (cipher.AEAD, error) {
 // function of pk, and the response alone does not yield the key.
 // Set YKS_DEVICE=<serial> to pick a specific YubiKey when several are plugged in.
 func challengeResponse(slot int, chal []byte, dev string) ([]byte, error) {
+	if dev == "" {
+		d, err := device()
+		if err != nil {
+			return nil, err
+		}
+		dev = d
+	}
 	cmd := ykmanOn(dev, "otp", "calculate", strconv.Itoa(slot), hex.EncodeToString(chal))
 	cmd.Stderr = os.Stderr // ykman prints its own "Touch your YubiKey..." prompt here
 	out, err := cmd.Output()
@@ -848,14 +903,11 @@ const (
 	hintClip  = "install 'wl-clipboard' (Wayland) or 'xclip' (X11); macOS has pbcopy built in"
 )
 
-// ykman builds an ykman command, honouring YKS_DEVICE.
+// ykman builds an ykman command that needs no particular YubiKey.
 func ykman(args ...string) *exec.Cmd { return ykmanOn("", args...) }
 
-// ykmanOn targets the YubiKey with serial dev; "" falls back to YKS_DEVICE.
+// ykmanOn targets the YubiKey with serial dev ("" = let ykman choose).
 func ykmanOn(dev string, args ...string) *exec.Cmd {
-	if dev == "" {
-		dev = os.Getenv("YKS_DEVICE")
-	}
 	if dev != "" {
 		args = append([]string{"--device", dev}, args...)
 	}
@@ -897,13 +949,39 @@ func cmdCheck() error {
 	} else {
 		v, _ := ykman("--version").Output()
 		report("ok", "ykman", strings.TrimSpace(string(v)))
-		out, err := ykman("otp", "info").CombinedOutput()
-		info := strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSpace(string(out)), "\n", " | ")), " ")
-		if err != nil {
-			report("FAIL", "yubikey", "not usable: "+info+" (plugged in? several keys? set YKS_DEVICE)")
-		} else {
-			otpInfo = string(out)
-			report("ok", "yubikey", info)
+		keys, err := listYubiKeys()
+		def, src := defaultDevice()
+		target := def
+		switch {
+		case err != nil:
+			report("FAIL", "yubikey", err.Error())
+		case len(keys) == 0:
+			report("FAIL", "yubikey", "none connected")
+		default:
+			found := false
+			for _, k := range keys {
+				report("ok", "yubikey", k.desc)
+				found = found || (def != "" && k.serial == def)
+			}
+			switch {
+			case def != "" && !found:
+				report("warn", "device", fmt.Sprintf("default YubiKey %s (from %s) is not connected", def, src))
+				target = ""
+			case def != "":
+				report("ok", "device", fmt.Sprintf("default %s (from %s)", def, src))
+			case len(keys) > 1:
+				report("warn", "device", "several connected and no default: yks asks each time; set -d, YKS_DEVICE or device= in .config")
+			}
+			if target != "" || len(keys) == 1 {
+				out, err := ykmanOn(target, "otp", "info").CombinedOutput()
+				info := strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSpace(string(out)), "\n", " | ")), " ")
+				if err != nil {
+					report("FAIL", "otp", "not usable: "+info)
+				} else {
+					otpInfo = string(out)
+					report("ok", "otp", info)
+				}
+			}
 		}
 	}
 

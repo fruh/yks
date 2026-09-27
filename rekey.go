@@ -33,7 +33,7 @@ func cmdRekey(args []string, globalSlot int) error {
 	fl.Usage = usage
 	newPw := fl.Bool("p", false, "")
 	slot := fl.Int("s", globalSlot, "")
-	dev := fl.String("d", "", "")
+	dev := fl.String("new-device", "", "")
 	mib := fl.Int("m", 0, "")
 	iters := fl.Int("t", 0, "")
 	_ = fl.Parse(args)
@@ -45,7 +45,16 @@ func cmdRekey(args []string, globalSlot int) error {
 	if err != nil {
 		return err
 	}
+	if *dev != "" && !validSerial(*dev) {
+		return fmt.Errorf("invalid YubiKey serial %q", *dev)
+	}
+	if _, err := device(); err != nil { // the key to decrypt with, asked before passwords
+		return err
+	}
 	nc := *c
+	if *dev != "" && c.Device != "" {
+		nc.Device = *dev // the configured default moves to the new key
+	}
 	if *slot != 0 {
 		if *slot != 1 && *slot != 2 {
 			return errors.New("slot must be 1 or 2")
