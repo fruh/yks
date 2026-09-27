@@ -1,6 +1,6 @@
 # yks — YubiKey-backed secret store
 
-[![ci](https://github.com/YOUR_GITHUB_USER/yks/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB_USER/yks/actions/workflows/ci.yml)
+[![ci](https://github.com/fruh/yks/actions/workflows/ci.yml/badge.svg)](https://github.com/fruh/yks/actions/workflows/ci.yml)
 
 `yks` is a small command-line tool that encrypts secrets and files with a key derived from **two factors**: an optional master password and a YubiKey HMAC-SHA1 challenge-response slot. It stores entries as individual encrypted files in a directory, similar to [`pass`](https://www.passwordstore.org/), without needing GPG.
 
@@ -65,7 +65,7 @@ brew install ykman
 ### With `go install` (recommended)
 
 ```sh
-go install github.com/YOUR_GITHUB_USER/yks@latest
+go install github.com/fruh/yks@latest
 ```
 
 This builds the binary and places it in `$(go env GOPATH)/bin`, usually `~/go/bin`. Make sure that folder is on your `PATH`:
@@ -75,14 +75,14 @@ export PATH="$PATH:$(go env GOPATH)/bin"     # add to ~/.zshrc or ~/.bashrc
 yks version
 ```
 
-To install a specific release instead of the latest, use its tag: `go install github.com/YOUR_GITHUB_USER/yks@v0.1.0`. Run the same command again to upgrade.
+To install a specific release instead of the latest, use its tag: `go install github.com/fruh/yks@v0.1.0`. Run the same command again to upgrade.
 
 Only Linux and macOS are supported. On other systems the build fails with `build constraints exclude all Go files`.
 
 ### From source
 
 ```sh
-git clone https://github.com/YOUR_GITHUB_USER/yks.git
+git clone https://github.com/fruh/yks.git
 cd yks
 go build -o yks .
 sudo install -m 0755 yks /usr/local/bin/
@@ -120,8 +120,8 @@ On macOS this makes no difference, so leave it out there.
 **The same flags with `go install`:**
 
 ```sh
-go install -trimpath -ldflags="-s -w" github.com/YOUR_GITHUB_USER/yks@latest
-CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" github.com/YOUR_GITHUB_USER/yks@latest   # Linux, static
+go install -trimpath -ldflags="-s -w" github.com/fruh/yks@latest
+CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" github.com/fruh/yks@latest   # Linux, static
 ```
 
 Without the flags, `go install` still works. The binary then contains paths from Go's module cache (`~/go/pkg/mod/...`) rather than your own project folder.
@@ -133,7 +133,7 @@ Without the flags, `go install` still works. The binary then contains paths from
 | Changing the code | `go build -o yks .` |
 | Installing on your machine | `go build -trimpath -ldflags="-s -w" -o yks .` |
 | Copying to other Linux machines | `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o yks .` |
-| Installing from GitHub | `go install -trimpath -ldflags="-s -w" github.com/YOUR_GITHUB_USER/yks@latest` |
+| Installing from GitHub | `go install -trimpath -ldflags="-s -w" github.com/fruh/yks@latest` |
 
 ### Local build, step by step
 
@@ -149,7 +149,7 @@ ykman --version   # YubiKey Manager, see Requirements
 **2. Get the source**
 
 ```sh
-git clone https://github.com/YOUR_GITHUB_USER/yks.git && cd yks
+git clone https://github.com/fruh/yks.git && cd yks
 # or, from an archive:
 unzip yks.zip && cd yks
 ```
