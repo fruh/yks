@@ -254,6 +254,7 @@ yks check
 | `rekey.go` | `yks rekey`: re-encrypt, verify and swap the whole store |
 | `device.go` | choosing a YubiKey when several are connected |
 | `tree.go` | tree view, filters and entry selection |
+| `sync.go` | `yks sync`: commit, rebase on the upstream, push |
 | `sys_linux.go` | peer-UID check and process hardening (Linux) |
 | `sys_darwin.go` | peer-UID check and process hardening (macOS) |
 | `go.mod`, `go.sum` | module definition and dependency checksums |
@@ -339,6 +340,7 @@ yks c github/personal -a
 | `c [filter]` | Decrypts an entry and copies its **first line** to the clipboard, or the **entire entry** with `-a`. The clipboard is cleared after 45 seconds, if it still contains the secret. Takes a filter like `d`. |
 | `rm [name]` | Removes an entry after asking `Remove <name>? [y/N]`. Takes an exact name only; without one, shows the numbered tree. Needs no password or YubiKey. See [Removing entries](#removing-entries). |
 | `ls [filter]` | Lists entries as a tree, optionally filtered; one name per line when piped. |
+| `sync` | For a git store: commits pending entry changes, pulls (rebase) and pushes. See [Syncing between machines](#syncing-between-machines). |
 | `forget` | Stops the cache agent immediately, wiping all cached keys. |
 | `check` | Checks dependencies, the YubiKey, the store and the agent, and reports what is missing. |
 | `rekey [-p] [-s 1\|2] [-new-device SERIAL] [-m MiB] [-t N]` | Re-encrypts every entry with the current or new settings. See [Re-encrypting the store](#re-encrypting-the-store-rekey). |
@@ -396,6 +398,7 @@ $ yks check
 | agent | the socket folder is insecure (caching is disabled) | warn |
 | git | auto-commit is on but the store is not a git repository or git is not installed; or `.config` is not committed (clones would miss it) | warn |
 | cache | never fails; shows the cache timeout and where it comes from | ok |
+| remote | the store is a git repository without an upstream branch (`yks sync` needs one) | warn |
 | clutter | hidden files or folders other than `.config`, `.gitignore` and `.git` are in the store (for example macOS `._*` files) | warn |
 
 `ykman` only reports whether a slot is *programmed*, not whether it holds a challenge-response credential. A slot holding Yubico OTP passes `check`, but decryption then fails with `ykman otp calculate failed`.
@@ -720,6 +723,64 @@ yks d mail/work                                         # check it
 
 A restored entry is decrypted with the password, YubiKey and Argon2 settings that were in use **when it was written**, because each file carries its own settings. If you have run `yks rekey` since then, you need the old password and YubiKey secret for it. Afterwards, `yks check` reports it as weaker than `.config` if its settings are older; run `yks rekey` to bring it up to date.
 
+### Syncing between machines
+
+`yks sync` keeps the store in step with its git remote, for example a private repository shared by your laptop and desktop:
+
+```sh
+yks sync
+```
+
+It does four things, in order:
+
+1. **Commits pending changes**, but only to entries (`*.yks`), `.config` and `.gitignore`. Any other changed or untracked file is listed as `not synced` and left alone, so a stray decrypted file in the store folder is never committed.
+2. **Fetches** from the upstream branch.
+3. **Integrates remote changes.** If you have no local commits, it fast-forwards. Otherwise it **rebases** your local commits on top of the remote ones (`git pull --rebase`), which keeps the history linear: a list of `add`/`update`/`remove` commits, without merge commits.
+4. **Pushes** your commits, if there are any.
+
+```
+$ yks sync
+committed 1 local change(s)
+fetching origin/main ...
+pushing to origin/main ...
+synced with origin/main: pulled 2, pushed 2 commit(s)
+```
+
+**Why rebase rather than merge:** entries are encrypted binary files, so git can never combine two versions of the same entry; a merge commit would add nothing but noise. As long as the two machines changed *different* entries, which is the usual case, the rebase is automatic.
+
+**Conflicts.** If the same entry was changed on both machines, `sync` stops, **aborts the rebase** and leaves the store exactly as it was. It lists the entries concerned and shows how to keep one version of each:
+
+```
+sync stopped: these files were changed both here and on origin/main:
+  mail/work.yks
+Encrypted entries cannot be merged. The rebase was aborted; nothing was changed.
+To resolve, keep one version of each file:
+  cd "/home/you/.ykstore" && git pull --rebase
+  git checkout --theirs <file>   # keep YOUR local version (in a rebase, "theirs" is yours)
+  git checkout --ours <file>     # or keep the REMOTE version
+  git add <file> && git rebase --continue
+  yks sync
+```
+
+To keep both versions of an entry, first save yours under a new name: `yks d mail/work | yks e mail/work-local`. A conflict on `.config` usually means `yks rekey` ran on both machines; keep one side for every file.
+
+**First-time setup.** `sync` needs an upstream branch. On the first machine:
+
+```sh
+cd ~/.ykstore
+git remote add origin git@github.com:you/ykstore-private.git   # a PRIVATE repository
+git push -u origin HEAD
+```
+
+On the other machines, clone it: `git clone git@github.com:you/ykstore-private.git ~/.ykstore`. `yks check` shows the upstream, or warns that there is none.
+
+**Good to know:**
+
+- `sync` never runs on its own; run it when you start or finish working on a machine.
+- It uses your normal git setup: SSH keys or credential helpers, commit signing, hooks.
+- After pulling, `sync` tells you if `.config` changed, for example because of a rekey on another machine. Run `yks check` then.
+- A rebase rewrites only your **unpushed** local commits. Nothing that was already pushed is changed.
+
 ⚠️ **Git history keeps every old secret, forever.** Every past version of every entry stays in the repository, still encrypted with the keys in use at the time. After a `yks rekey` done because a password or YubiKey secret may have leaked, the old versions in git history can still be opened with those old keys, including copies on any remote you pushed to. If that matters, start a fresh history after rekeying:
 
 ```sh
@@ -955,6 +1016,9 @@ If a YubiKey or the HMAC secret backup may have been compromised, program a fres
 | `.config is ignored by a git rule and not committed` | A gitignore rule, often a global one, matches `.config`. Run the `check-ignore` command from the message to find it, then remove it or force-add: `git add -f .config`. |
 | Clone has entries but no `.config` (`no store config, run 'yks init'`) | `.config` was never committed. On the original machine: `git add .config && git commit && git push`, then `git pull` in the clone. |
 | `git auto-commit skipped: …` | Auto-commit is on but the store is not a git repository, git is missing, or the commit failed (for example, commit signing failed). The entry itself was saved. |
+| `sync stopped: these files were changed both here and on …` | The same entry changed on two machines. Nothing was changed; follow the steps printed, or see [Syncing between machines](#syncing-between-machines). |
+| `the current branch has no upstream` | Set one once: `git -C ~/.ykstore push -u origin HEAD`. |
+| `a git rebase or merge is in progress` | A manual conflict resolution was left unfinished. Finish it (`git rebase --continue`) or undo it (`git rebase --abort`), then run `yks sync` again. |
 | `no store config, run 'yks init'` | The store does not exist yet, or `YKS_DIR` points somewhere else. |
 | Files named `._something` appeared after copying from a Mac | macOS metadata files. `yks` ignores them; delete them with the `find` command in [Hidden files are ignored](#hidden-files-are-ignored). |
 | `unknown flag -x` | A mistyped flag. If `-x` really is the start of an entry name, put `--` before it: `yks d -- -x`. |
@@ -970,6 +1034,6 @@ If a YubiKey or the HMAC secret backup may have been compromised, program a fres
 - **Changing the master password, slot, YubiKey secret or Argon2 settings** means re-encrypting every entry. `yks rekey` does this safely, but it needs one or two YubiKey taps per entry, and the store directory itself must be renamable (it cannot be a mount point).
 - **Only HMAC-SHA1 challenge-response is supported**, which is the only challenge-response mode the YubiKey OTP application offers. The response is used only as key material inside HKDF, and HMAC-SHA1 remains secure for that purpose.
 - **`c` copies only the first line** unless you add `-a`. Binary entries (such as PDFs) cannot be copied at all; use `yks d name > file`.
-- **No built-in version history.** Use git (see [History with git](#history-with-git)). `yks` only commits, with `YKS_GIT=1`; it never pushes or pulls.
+- **No built-in version history.** Use git (see [History with git](#history-with-git)). `yks` commits automatically with auto-commit on, and pulls and pushes only when you run `yks sync`.
 - **No built-in password generator.** Use existing tools such as `pwgen`.
 - **Filters match entry names only**, not the encrypted contents (searching contents would mean decrypting every entry, one YubiKey operation each).

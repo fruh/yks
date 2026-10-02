@@ -107,6 +107,8 @@ func usage() {
   rm [name]         remove entry after confirmation, -f skips it
                     (exact name only; no name: pick from a numbered tree)
   ls [filter]       list entries as a tree (plain list when piped)
+  sync              git store only: commit pending entry changes, pull
+                    (rebase) from the upstream, push
   forget            stop the cache agent, wiping cached keys
   check             check dependencies, YubiKey, store and agent
   version           print version
@@ -224,6 +226,8 @@ func main() {
 			filter = a[1]
 		}
 		err = cmdList(filter)
+	case a[0] == "sync" && len(a) == 1:
+		err = cmdSync()
 	case a[0] == "forget" && len(a) == 1:
 		agentStop()
 	default:
@@ -1108,6 +1112,13 @@ func cmdCheck() error {
 			report("ok", "git", "repository found, auto-commit off (enable with git=1 in .config or YKS_GIT=1)")
 		case auto:
 			report("warn", "git", "auto-commit on (from "+gsrc+") but the store is not a git repository")
+		}
+		if gerr == nil && lerr == nil {
+			if up, err := exec.Command("git", "-C", root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").Output(); err == nil {
+				report("ok", "remote", "upstream "+strings.TrimSpace(string(up))+" ('yks sync' to pull and push)")
+			} else {
+				report("warn", "remote", "no upstream branch, 'yks sync' will not work: git -C "+strconv.Quote(root)+" push -u origin HEAD")
+			}
 		}
 		if gerr == nil && lerr == nil &&
 			exec.Command("git", "-C", root, "ls-files", "--error-unmatch", "--", ".config").Run() != nil {
