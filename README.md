@@ -164,8 +164,8 @@ go mod tidy       # first time without go.sum, or after changing imports; create
 **4. Check the code (optional, the same checks CI runs)**
 
 ```sh
-gofmt -w .
 gofmt -l .        # prints files that need formatting; fix with: gofmt -w .
+gofmt -w .
 go vet ./...
 ```
 
@@ -253,6 +253,7 @@ yks check
 | `agent.go` | in-memory password cache agent (client and server) |
 | `rekey.go` | `yks rekey`: re-encrypt, verify and swap the whole store |
 | `device.go` | choosing a YubiKey when several are connected |
+| `tree.go` | tree view, filters and entry selection |
 | `sys_linux.go` | peer-UID check and process hardening (Linux) |
 | `sys_darwin.go` | peer-UID check and process hardening (macOS) |
 | `go.mod`, `go.sum` | module definition and dependency checksums |
@@ -306,9 +307,10 @@ yks init                          # create ~/.ykstore, choose default slot (Argo
 yks e github/personal             # type a secret (hidden, entered twice)
 yks c github/personal             # copy it to the clipboard for 45 s
 yks d github/personal             # print it to stdout
-yks c                             # pick an entry from a numbered list
+yks c                             # pick an entry from a numbered tree
+yks c git                         # filter: pick among entries matching "git"
 yks rm github/personal            # remove an entry (asks for confirmation)
-yks ls                            # list all entries
+yks ls                            # show all entries as a tree
 ```
 
 ---
@@ -333,10 +335,10 @@ yks c github/personal -a
 |---|---|
 | `init [-m MiB] [-t N]` | Creates the store directory and `.config`, and asks for the default slot (or takes it from `-s`). `-m` sets Argon2id memory (default 256 MiB), `-t` its iterations (default 3). |
 | `e <name> [file]` | Encrypts into entry `<name>`. The input is `file` if given; otherwise piped stdin; otherwise a hidden prompt, entered twice. Empty or whitespace-only input is refused, so a failed pipe cannot wipe an entry. |
-| `d [name]` | Decrypts an entry to stdout. Without a name, shows a numbered list and asks which one. |
-| `c [name]` | Decrypts an entry and copies its **first line** to the clipboard, or the **entire entry** with `-a`. The clipboard is cleared after 45 seconds, if it still contains the secret. Without a name, shows a numbered list and asks which one. |
-| `rm [name]` | Removes an entry after asking `Remove <name>? [y/N]`. Without a name, shows a numbered list and asks which one. Needs no password or YubiKey. See [Removing entries](#removing-entries). |
-| `ls` | Lists all entries. |
+| `d [filter]` | Decrypts an entry to stdout. The filter is an exact name or text matched anywhere in the path; see [Selecting an entry](#selecting-an-entry-filters-and-the-tree-view). |
+| `c [filter]` | Decrypts an entry and copies its **first line** to the clipboard, or the **entire entry** with `-a`. The clipboard is cleared after 45 seconds, if it still contains the secret. Takes a filter like `d`. |
+| `rm [name]` | Removes an entry after asking `Remove <name>? [y/N]`. Takes an exact name only; without one, shows the numbered tree. Needs no password or YubiKey. See [Removing entries](#removing-entries). |
+| `ls [filter]` | Lists entries as a tree, optionally filtered; one name per line when piped. |
 | `forget` | Stops the cache agent immediately, wiping all cached keys. |
 | `check` | Checks dependencies, the YubiKey, the store and the agent, and reports what is missing. |
 | `rekey [-p] [-s 1\|2] [-new-device SERIAL] [-m MiB] [-t N]` | Re-encrypts every entry with the current or new settings. See [Re-encrypting the store](#re-encrypting-the-store-rekey). |
@@ -392,7 +394,8 @@ $ yks check
 | entries | some entries use weaker Argon2id settings than `.config` (fix with `yks rekey`) | warn |
 | clipboard | no clipboard tool (only `c` is affected) | warn |
 | agent | the socket folder is insecure (caching is disabled) | warn |
-| git | `YKS_GIT=1` is set but the store is not a git repository, or git is not installed | warn |
+| git | auto-commit is on but the store is not a git repository or git is not installed; or `.config` is not committed (clones would miss it) | warn |
+| cache | never fails; shows the cache timeout and where it comes from | ok |
 | clutter | hidden files or folders other than `.config`, `.gitignore` and `.git` are in the store (for example macOS `._*` files) | warn |
 
 `ykman` only reports whether a slot is *programmed*, not whether it holds a challenge-response credential. A slot holding Yubico OTP passes `check`, but decryption then fails with `ykman otp calculate failed`.
@@ -412,10 +415,7 @@ With one YubiKey plugged in, `yks` simply uses it. With several (for example you
 If several keys are connected and no default is set, `yks` asks which one to use, once per command, before asking for the master password:
 
 ```
-$ yks c
-1  github/personal
-2  test
-Entry [1-2, Enter to cancel]: 2
+$ yks c test
 Several YubiKeys are connected:
 1  YubiKey 5 NFC (5.1.2) [OTP+FIDO+CCID] Serial: 12345678
 2  YubiKey 5C NFC (5.4.3) [OTP+FIDO+CCID] Serial: 87654321
@@ -450,10 +450,15 @@ $ yks -a c                      # pick from the list, copy everything
 
 ```
 $ yks rm
-1  docs/passport
-2  github/personal
-3  mail/old
+~/.ykstore
+├── docs/
+│   └── passport [1]
+├── github/
+│   └── personal [2]
+└── mail/
+    └── old [3]
 Entry [1-3, Enter to cancel]: 3
+selected: mail/old
 Remove mail/old? [y/N]: y
 removed mail/old
 ```
@@ -467,23 +472,57 @@ removed mail/old
 
 The file is deleted normally, not overwritten. That is fine because it only ever contained ciphertext, but copies elsewhere remain: backups, and **git history**, from which the entry can still be restored (see [History with git](#history-with-git)).
 
-### Picking an entry from a list
+### Selecting an entry: filters and the tree view
 
-Run `d`, `c` or `rm` without a name to choose from a numbered list:
+For `d` and `c`, the argument is a **filter**, not just a name:
+
+| Argument | Result |
+|---|---|
+| none | a numbered tree of all entries |
+| an exact entry name | that entry, even if the name also appears inside other entries (`mail/work` wins over `mail/work-old`) |
+| text that matches **one** entry | that entry, used directly; `selected: name` is printed so you see which one |
+| text that matches **several** entries | a numbered tree of only the matches |
+| text that matches **nothing** | an error |
+
+The filter matches anywhere in the path, ignoring case: `git` matches `github/personal`, `work/GitLab` and `legacy/digit-pin`.
 
 ```
-$ yks c
-1  docs/passport
-2  github/personal
-3  mail/work
+$ yks c git
+3 entries match "git":
+~/.ykstore
+├── github/
+│   ├── personal [1]
+│   └── work [2]
+└── work/
+    └── gitlab [3]
 Entry [1-3, Enter to cancel]: 2
+selected: github/work
+copied first line to clipboard, clearing in 45s
+
+$ yks c passp
+selected: docs/passport
 copied first line to clipboard, clearing in 45s
 ```
 
-- Entries are sorted alphabetically, the same order as `yks ls`.
-- Press Enter on an empty line, or Ctrl-D, to cancel.
-- An invalid number asks again.
-- The list and prompt go to the terminal, not stdout, so redirecting still works: `yks d > passport.pdf` shows the list on screen and writes only the decrypted file.
+- After you choose, or when a filter picks the only match, `selected: <full path>` is printed, so you always see which entry is decrypted or copied. It goes to the terminal, so it shows even when output is redirected.
+- Each entry shows its number in brackets after the name, like `work [2]`. Folders end with `/` and have no number; only entries can be chosen.
+- An entry that is also a folder (`work` and `work/vpn`) is shown once, with its number and its contents below it.
+- Press Enter on an empty line, or Ctrl-D, to cancel. An invalid number asks again.
+- The tree and the prompt go to the terminal, not stdout, so redirecting still works: `yks d pass > passport.pdf` shows the tree on screen and writes only the decrypted file.
+- In scripts, use exact names. A filter that matches several entries needs a terminal to ask on.
+- `rm` deliberately takes only an **exact** name (or no name, for the tree), so a loose filter can never remove the wrong entry.
+
+`yks ls` shows the same tree, without numbers, and accepts the same filter:
+
+```
+$ yks ls mail
+~/.ykstore  (matching "mail")
+└── mail/
+    ├── home
+    └── work
+```
+
+When its output is piped or redirected, `ls` prints one name per line instead, for scripts: `yks ls | wc -l`, `yks ls mail | while read -r n; do …; done`.
 
 Examples:
 
@@ -521,9 +560,9 @@ Entry names:
 | Variable | Default | Meaning |
 |---|---|---|
 | `YKS_DIR` | `~/.ykstore` | Store location |
-| `YKS_CACHE_TTL` | `300` | Seconds to cache the master key; `0` turns caching off |
+| `YKS_CACHE_TTL` | `300` | Seconds to cache the master key (maximum 86400); `0` turns caching off. Overrides `cache_ttl=` in `.config` |
 | `YKS_DEVICE` | *(none)* | Default YubiKey serial when several are connected; overrides `device=` in `.config`, overridden by `-d` (see [Choosing a YubiKey](#choosing-a-yubikey)) |
-| `YKS_GIT` | *(off)* | `1` commits every change automatically if the store is a git repository (see [History with git](#history-with-git)) |
+| `YKS_GIT` | *(off)* | `1` commits every change automatically if the store is a git repository, `0` turns it off. Overrides `git=` in `.config` (see [History with git](#history-with-git)) |
 
 ---
 
@@ -603,6 +642,15 @@ salt=5f1c…(32 hex chars)
 | `argon_p` | Argon2id parallelism |
 | `salt` | Store-wide Argon2 salt (16 bytes) |
 | `device` | *(optional)* default YubiKey serial, used when several keys are connected |
+| `git` | *(optional)* `1` turns automatic git commits on for this store, `0` off |
+| `cache_ttl` | *(optional)* seconds to cache the master key, `0`–`86400`; `0` turns caching off |
+
+The optional settings can be added to `.config` by hand; `yks` keeps them when it rewrites the file (for example during `rekey`). Environment variables win over `.config`, so you can override a store setting for one command:
+
+```sh
+YKS_CACHE_TTL=0 yks d bank/pin      # no caching this time
+YKS_GIT=0 yks -f e scratch/test     # no commit this time
+```
 
 Every `.yks` file contains its own copy of these parameters in its header. Each file can therefore be decrypted on its own, and `.config` only supplies defaults for **new** entries. Editing `.config` by hand affects only entries written afterwards; use [`yks rekey`](#re-encrypting-the-store-rekey) to change settings for existing entries.
 
@@ -644,20 +692,23 @@ git init
 git add -A && git commit -m "init"
 ```
 
-**Automatic commits.** Set `YKS_GIT=1` and `yks` commits after every change:
+**Automatic commits.** Turn them on for the store by adding `git=1` to `.config` (recommended: the setting travels with the store to every clone), or for your shell with `YKS_GIT=1`. `yks` then commits after every change:
 
 ```sh
-export YKS_GIT=1      # add to ~/.zshrc or ~/.bashrc
+echo git=1 >> ~/.ykstore/.config   # this store, on every machine
+export YKS_GIT=1                    # or: this shell (add to ~/.zshrc or ~/.bashrc)
 ```
 
 | Action | Commit message | What is committed |
 |---|---|---|
-| `yks e name` (new entry) | `yks: add name` | that entry only |
-| `yks -f e name` (overwrite) | `yks: update name` | that entry only |
-| `yks rm name` | `yks: remove name` | that entry only (if git tracked it) |
+| `yks e name` (new entry) | `yks: add name` | that entry, plus `.config` / `.gitignore` if changed |
+| `yks -f e name` (overwrite) | `yks: update name` | that entry, plus `.config` / `.gitignore` if changed |
+| `yks rm name` | `yks: remove name` | that entry (if git tracked it), plus `.config` / `.gitignore` if changed |
 | `yks rekey` | `yks: rekey N entries` | everything in the store, including `.config` |
 
-`yks` never pushes, and uses your normal git configuration (author, commit signing, hooks). If a commit fails, you get a warning but the entry is already saved. `yks check` shows whether auto-commit is active.
+`yks` never pushes, and uses your normal git configuration (author, commit signing, hooks). If a commit fails, you get a warning but the entry is already saved. `yks check` shows whether auto-commit is active and where the setting comes from.
+
+**`.config` is always committed with auto-commit**, so settings reach every clone. Without it, a clone has entries but no `.config`, and `yks` would ask you to run `yks init`. Don't: pull or copy the original `.config` instead. If a git ignore rule blocks `.config` (some global gitignore files list it), `yks` warns and `yks check` tells you how to fix it. Without auto-commit, add it yourself: `git add .config && git commit`.
 
 **Restoring an old version:**
 
@@ -777,10 +828,10 @@ How it works:
 - **Starting.** The first command that needs `pk` and finds no agent asks for your password, creates the socket, and launches a detached copy of itself (`yks __agent`, visible in `ps`). The key is passed through a pipe, never through arguments or files. The agent is detached from the terminal, so closing the terminal does not stop it.
 - **Socket location.** `$XDG_RUNTIME_DIR/yks-<uid>/agent.sock` on Linux, or `$TMPDIR/yks-<uid>/agent.sock` on macOS (`/tmp` is the fallback). The folder must be owned by you, have mode `0700` and not be a symlink; otherwise caching is refused.
 - **Identity check.** Both the agent and each `yks` command check that the other side of the socket runs as your user (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS).
-- **Timeout.** Each key expires `YKS_CACHE_TTL` seconds (default 300, maximum 24 h) after the password was entered; using it does not extend it. When no keys are left, the agent deletes its socket and exits.
+- **Timeout.** Each key expires `YKS_CACHE_TTL` or `cache_ttl=` seconds (default 300, maximum 24 h) after the password was entered; using it does not extend it. When no keys are left, the agent deletes its socket and exits.
 - **Only proven keys are cached.** When decrypting, a key is cached only after it has opened an entry, so a mistyped password is never cached. (`e` caches right away, because you typed the password twice.)
 - **Manual stop.** `yks forget` stops the agent at once. A reboot also ends it.
-- **Disabling.** `YKS_CACHE_TTL=0` turns caching off completely; no agent is started.
+- **Disabling.** `cache_ttl=0` in `.config`, or `YKS_CACHE_TTL=0`, turns caching off completely; no agent is started.
 
 To check whether the agent is running:
 
@@ -901,7 +952,9 @@ If a YubiKey or the HMAC secret backup may have been compromised, program a fres
 | `cannot move old store aside (is … a mount point?)` | `rekey` swaps directories, which is impossible when the store is itself a mount point. Put the store in a subfolder of the mount and point `YKS_DIR` at it. |
 | `<entry>: cannot decrypt … (nothing was changed)` during `rekey` | None of the passwords tried, including 3 typed attempts, opened that entry, or the YubiKey is wrong for it. Your store was not modified. |
 | `refusing to store an empty secret` | The input to `e` was empty or only whitespace, often because the command feeding the pipe failed. Nothing was written. |
-| `git auto-commit skipped: …` | `YKS_GIT=1` is set but the store is not a git repository, git is missing, or the commit failed (for example, commit signing failed). The entry itself was saved. |
+| `.config is ignored by a git rule and not committed` | A gitignore rule, often a global one, matches `.config`. Run the `check-ignore` command from the message to find it, then remove it or force-add: `git add -f .config`. |
+| Clone has entries but no `.config` (`no store config, run 'yks init'`) | `.config` was never committed. On the original machine: `git add .config && git commit && git push`, then `git pull` in the clone. |
+| `git auto-commit skipped: …` | Auto-commit is on but the store is not a git repository, git is missing, or the commit failed (for example, commit signing failed). The entry itself was saved. |
 | `no store config, run 'yks init'` | The store does not exist yet, or `YKS_DIR` points somewhere else. |
 | Files named `._something` appeared after copying from a Mac | macOS metadata files. `yks` ignores them; delete them with the `find` command in [Hidden files are ignored](#hidden-files-are-ignored). |
 | `unknown flag -x` | A mistyped flag. If `-x` really is the start of an entry name, put `--` before it: `yks d -- -x`. |
@@ -918,4 +971,5 @@ If a YubiKey or the HMAC secret backup may have been compromised, program a fres
 - **Only HMAC-SHA1 challenge-response is supported**, which is the only challenge-response mode the YubiKey OTP application offers. The response is used only as key material inside HKDF, and HMAC-SHA1 remains secure for that purpose.
 - **`c` copies only the first line** unless you add `-a`. Binary entries (such as PDFs) cannot be copied at all; use `yks d name > file`.
 - **No built-in version history.** Use git (see [History with git](#history-with-git)). `yks` only commits, with `YKS_GIT=1`; it never pushes or pulls.
-- **No built-in password generator or search.** Use existing tools such as `pwgen` and `grep` on `yks ls`.
+- **No built-in password generator.** Use existing tools such as `pwgen`.
+- **Filters match entry names only**, not the encrypted contents (searching contents would mean decrypting every entry, one YubiKey operation each).

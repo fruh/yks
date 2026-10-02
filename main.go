@@ -84,9 +84,11 @@ func (k kdf) cacheID() string {
 }
 
 type config struct {
-	Slot   int
-	KDF    kdf
-	Device string // optional default YubiKey serial
+	Slot     int
+	KDF      kdf
+	Device   string // optional default YubiKey serial
+	Git      string // optional: "1" auto-commit on, "0" off, "" unset
+	CacheTTL int    // optional cache TTL in seconds; -1 = unset
 }
 
 func usage() {
@@ -96,13 +98,15 @@ func usage() {
                     create the store and choose a default slot
                     (Argon2id memory, default 256 MiB; iterations, default 3)
   e <name> [file]   encrypt file (or stdin, or prompt) into entry <name>
-  d [name]          decrypt entry to stdout (no name: pick from a numbered list)
-  c [name]          decrypt, copy first line to clipboard, cleared after 45s
+  d [filter]        decrypt entry to stdout
+  c [filter]        decrypt, copy first line to clipboard, cleared after 45s
                     (-a: copy the entire entry)
-                    (no name: pick from a numbered list)
+                    filter: exact name, or text matched anywhere in the path
+                    (case-insensitive); one match is used directly, several
+                    are shown as a numbered tree; none: pick from all
   rm [name]         remove entry after confirmation, -f skips it
-                    (no name: pick from a numbered list)
-  ls                list entries
+                    (exact name only; no name: pick from a numbered tree)
+  ls [filter]       list entries as a tree (plain list when piped)
   forget            stop the cache agent, wiping cached keys
   check             check dependencies, YubiKey, store and agent
   version           print version
@@ -115,9 +119,11 @@ flags: -s slot for new entries (default from config),
        -d, --device SERIAL  YubiKey to use (see: ykman list --serials),
        -f overwrite on 'e', no confirmation on 'rm',
        -a copy the entire entry with 'c'
-env:   YKS_DIR (default ~/.ykstore), YKS_CACHE_TTL seconds (default 300, 0 = off),
+env:   YKS_DIR (default ~/.ykstore), YKS_CACHE_TTL seconds (default 300, 0 = off;
+       also cache_ttl= in .config),
        YKS_DEVICE default YubiKey serial (also: device= in .config),
-       YKS_GIT=1 commit changes automatically if the store is a git repository
+       YKS_GIT=1/0 commit changes automatically if the store is a git repository
+       (also git=1 in .config; the environment wins)
 `)
 	os.Exit(2)
 }
@@ -194,23 +200,30 @@ func main() {
 		}
 		err = cmdEncrypt(a[1], in, *slot, *force)
 	case (a[0] == "d" || a[0] == "c") && len(a) <= 2:
-		name := ""
+		filter := ""
 		if len(a) == 2 {
-			name = a[1]
-		} else if name, err = pickEntry(); err != nil {
+			filter = a[1]
+		}
+		var name string
+		if name, err = resolveEntry(filter); err != nil {
 			break
 		}
 		err = cmdDecrypt(name, a[0] == "c", *all)
 	case a[0] == "rm" && len(a) <= 2:
+		// rm takes an exact name, never a filter: removal should be deliberate.
 		name := ""
 		if len(a) == 2 {
 			name = a[1]
-		} else if name, err = pickEntry(); err != nil {
+		} else if name, err = pickTree(nil, ""); err != nil {
 			break
 		}
 		err = cmdRemove(name, *force)
-	case a[0] == "ls" && len(a) == 1:
-		err = cmdList()
+	case a[0] == "ls" && len(a) <= 2:
+		filter := ""
+		if len(a) == 2 {
+			filter = a[1]
+		}
+		err = cmdList(filter)
 	case a[0] == "forget" && len(a) == 1:
 		agentStop()
 	default:
@@ -277,6 +290,12 @@ func (c config) String() string {
 	if c.Device != "" {
 		s += "device=" + c.Device + "\n"
 	}
+	if c.Git != "" {
+		s += "git=" + c.Git + "\n"
+	}
+	if c.CacheTTL >= 0 {
+		s += fmt.Sprintf("cache_ttl=%d\n", c.CacheTTL)
+	}
 	return s
 }
 
@@ -314,7 +333,7 @@ func cmdInit(args []string, slot int) error {
 		}
 		slot, _ = strconv.Atoi(strings.TrimSpace(s))
 	}
-	c := config{Slot: slot, KDF: k, Device: flagDevice}
+	c := config{Slot: slot, KDF: k, Device: flagDevice, CacheTTL: -1}
 	if c.Device == "" {
 		if keys, err := listYubiKeys(); err == nil && len(keys) > 1 {
 			if c.Device, err = pickYubiKey(keys, true); err != nil {
@@ -346,7 +365,17 @@ func loadConfig() (*config, error) {
 	}
 	num := func(k string) uint32 { n, _ := strconv.ParseUint(m[k], 10, 32); return uint32(n) }
 	c := &config{Slot: int(num("slot")), KDF: kdf{T: num("argon_t"), M: num("argon_m"), P: uint8(num("argon_p"))},
-		Device: m["device"]}
+		Device: m["device"], Git: m["git"], CacheTTL: -1}
+	if v, ok := m["cache_ttl"]; ok {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > maxTTL {
+			return nil, fmt.Errorf("invalid cache_ttl=%q in %s (0..%d seconds)", v, configPath(), maxTTL)
+		}
+		c.CacheTTL = n
+	}
+	if c.Git != "" && c.Git != "0" && c.Git != "1" {
+		return nil, fmt.Errorf("invalid git=%q in %s (use 1 or 0)", c.Git, configPath())
+	}
 	c.KDF.Salt, err = hex.DecodeString(m["salt"])
 	if err != nil || !c.KDF.valid() || (c.Slot != 1 && c.Slot != 2) || (c.Device != "" && !validSerial(c.Device)) {
 		return nil, errors.New("invalid config " + configPath())
@@ -430,30 +459,6 @@ func listClutter() []string {
 	return junk
 }
 
-func cmdList() error {
-	names, err := listEntries()
-	for _, n := range names {
-		fmt.Println(n)
-	}
-	return err
-}
-
-// pickEntry asks which entry to use, from a numbered list.
-func pickEntry() (string, error) {
-	names, err := listEntries()
-	if err != nil {
-		return "", err
-	}
-	if len(names) == 0 {
-		return "", errors.New("store is empty")
-	}
-	i, err := pickFrom("", names, "Entry", false)
-	if err != nil {
-		return "", err
-	}
-	return names[i], nil
-}
-
 // pickFrom shows a numbered list on the terminal (not stdout, which may be
 // redirected) and returns the chosen index. Empty input or Ctrl-D cancels,
 // or returns -1 when optional is set.
@@ -470,13 +475,19 @@ func pickFrom(header string, items []string, what string, optional bool) (int, e
 	for i, n := range items {
 		fmt.Fprintf(t, "%*d  %s\n", w, i+1, n)
 	}
+	return askIndex(t, len(items), what, optional)
+}
+
+// askIndex prompts on t until it gets a number from 1 to n and returns it
+// zero-based. Empty input or Ctrl-D cancels, or returns -1 when optional.
+func askIndex(t *os.File, n int, what string, optional bool) (int, error) {
 	hint := ", Enter to cancel"
 	if optional {
 		hint = ""
 	}
 	r := bufio.NewReader(t)
 	for {
-		fmt.Fprintf(t, "%s [1-%d%s]: ", what, len(items), hint)
+		fmt.Fprintf(t, "%s [1-%d%s]: ", what, n, hint)
 		line, rerr := r.ReadString('\n')
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -488,7 +499,7 @@ func pickFrom(header string, items []string, what string, optional bool) (int, e
 			}
 			return -1, errors.New("cancelled")
 		}
-		if i, err := strconv.Atoi(line); err == nil && i >= 1 && i <= len(items) {
+		if i, err := strconv.Atoi(line); err == nil && i >= 1 && i <= n {
 			return i - 1, nil
 		}
 		fmt.Fprintln(t, "invalid choice")
@@ -540,7 +551,7 @@ func cmdRemove(name string, force bool) error {
 // gitTracked reports whether auto-commit is on and git tracks rel, so that
 // removing an untracked entry does not produce a failing commit.
 func gitTracked(rel string) bool {
-	if os.Getenv("YKS_GIT") != "1" {
+	if on, _ := gitEnabled(); !on {
 		return false
 	}
 	return exec.Command("git", "-C", storeDir(), "ls-files", "--error-unmatch", "--", rel).Run() == nil
@@ -600,11 +611,12 @@ func cmdEncrypt(name, in string, slot int, force bool) error {
 	return nil
 }
 
-// gitAuto commits the given paths (relative to the store) when YKS_GIT=1 and
-// the store is a git repository. Failures are warnings: the entry is already
-// safely written.
+// gitAuto commits the given paths (relative to the store) when auto-commit is
+// on (YKS_GIT or git= in .config) and the store is a git repository. .config
+// and .gitignore are always included when present, so settings travel with
+// the store. Failures are warnings: the entry is already safely written.
 func gitAuto(msg string, paths ...string) {
-	if os.Getenv("YKS_GIT") != "1" {
+	if on, _ := gitEnabled(); !on {
 		return
 	}
 	root := storeDir()
@@ -616,6 +628,16 @@ func gitAuto(msg string, paths ...string) {
 	if _, err := exec.LookPath("git"); err != nil {
 		warn("git not found")
 		return
+	}
+	for _, f := range []string{".config", ".gitignore"} {
+		if _, err := os.Stat(filepath.Join(root, f)); err != nil {
+			continue
+		}
+		if exec.Command("git", "-C", root, "check-ignore", "-q", "--", f).Run() == nil {
+			fmt.Fprintf(os.Stderr, "yks: warning: %s is ignored by a git rule and not committed (see: git -C %q check-ignore -v %s)\n", f, root, f)
+			continue
+		}
+		paths = append(paths, f)
 	}
 	add := append([]string{"-C", root, "add", "-A", "--"}, paths...)
 	commit := append([]string{"-C", root, "commit", "-q", "-m", msg, "--"}, paths...)
@@ -770,10 +792,33 @@ func challengeResponse(slot int, chal []byte, dev string) ([]byte, error) {
 // ---------- password / input ----------
 
 func cacheTTL() int {
-	if v, err := strconv.Atoi(os.Getenv("YKS_CACHE_TTL")); err == nil {
-		return v
+	ttl, _ := cacheTTLSource()
+	return ttl
+}
+
+// cacheTTLSource: YKS_CACHE_TTL, then cache_ttl= in .config, then 300 s.
+func cacheTTLSource() (int, string) {
+	if v, err := strconv.Atoi(os.Getenv("YKS_CACHE_TTL")); err == nil && v >= 0 {
+		return v, "YKS_CACHE_TTL"
 	}
-	return 300
+	if c, err := loadConfig(); err == nil && c.CacheTTL >= 0 {
+		return c.CacheTTL, ".config"
+	}
+	return 300, "default"
+}
+
+// gitEnabled: YKS_GIT=1/0, then git=1/0 in .config, then off.
+func gitEnabled() (bool, string) {
+	switch os.Getenv("YKS_GIT") {
+	case "1":
+		return true, "YKS_GIT"
+	case "0":
+		return false, "YKS_GIT"
+	}
+	if c, err := loadConfig(); err == nil && c.Git != "" {
+		return c.Git == "1", ".config"
+	}
+	return false, "default"
 }
 
 const maxTries = 3
@@ -1044,18 +1089,33 @@ func cmdCheck() error {
 		report("FAIL", "store", err.Error())
 	} else {
 		report("ok", "store", fmt.Sprintf("%s (default slot %d)", storeDir(), c.Slot))
-		_, gerr := os.Stat(filepath.Join(storeDir(), ".git"))
+		ttl, tsrc := cacheTTLSource()
+		if ttl == 0 {
+			report("ok", "cache", "off (from "+tsrc+")")
+		} else {
+			report("ok", "cache", fmt.Sprintf("%d s (from %s)", min(ttl, maxTTL), tsrc))
+		}
+		root := storeDir()
+		_, gerr := os.Stat(filepath.Join(root, ".git"))
 		_, lerr := exec.LookPath("git")
-		auto := os.Getenv("YKS_GIT") == "1"
+		auto, gsrc := gitEnabled()
 		switch {
 		case gerr == nil && auto && lerr != nil:
-			report("warn", "git", "YKS_GIT=1 but git is not installed")
+			report("warn", "git", "auto-commit on (from "+gsrc+") but git is not installed")
 		case gerr == nil && auto:
-			report("ok", "git", "repository found, auto-commit on")
+			report("ok", "git", "repository found, auto-commit on (from "+gsrc+")")
 		case gerr == nil:
-			report("ok", "git", "repository found, auto-commit off (set YKS_GIT=1 to enable)")
+			report("ok", "git", "repository found, auto-commit off (enable with git=1 in .config or YKS_GIT=1)")
 		case auto:
-			report("warn", "git", "YKS_GIT=1 but the store is not a git repository")
+			report("warn", "git", "auto-commit on (from "+gsrc+") but the store is not a git repository")
+		}
+		if gerr == nil && lerr == nil &&
+			exec.Command("git", "-C", root, "ls-files", "--error-unmatch", "--", ".config").Run() != nil {
+			hint := fmt.Sprintf("git -C %q add .config && git -C %q commit -m 'add .config'", root, root)
+			if exec.Command("git", "-C", root, "check-ignore", "-q", "--", ".config").Run() == nil {
+				hint = fmt.Sprintf("it is ignored by a git rule (see: git -C %q check-ignore -v .config); force-add it: git -C %q add -f .config", root, root)
+			}
+			report("warn", "git", ".config is not committed, so clones will miss it: "+hint)
 		}
 		if c.KDF.M < defaultArgonMiB*1024 || c.KDF.T < defaultArgonT {
 			report("warn", "argon2", fmt.Sprintf("store uses %d MiB, t=%d; recommended at least %d MiB, t=%d: run 'yks rekey -m %d -t %d'",
