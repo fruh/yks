@@ -293,7 +293,9 @@ updated /usr/local/bin/yks: v0.3.0 -> v0.4.0
 
 ## YubiKey setup
 
-Slot 1 usually holds the factory Yubico OTP credential. Slot 2 is normally free, so it is the usual choice. **Programming a slot overwrites whatever was in it.**
+`yks` uses **slot 1** by default (`yks init` suggests it; press Enter to accept). Slot 2 works just as well: choose it with `-s 2` at `yks init`.
+
+⚠️ On a new YubiKey, slot 1 holds the factory **Yubico OTP** credential (the one that types a one-time code when you touch the key). **Programming a slot overwrites whatever was in it**, so programming slot 1 removes that credential. If you use Yubico OTP for any login, use slot 2 instead. Check what is programmed first with `ykman otp info`.
 
 Check the current state of the slots:
 
@@ -301,12 +303,12 @@ Check the current state of the slots:
 ykman otp info
 ```
 
-Program slot 2 for HMAC-SHA1 challenge-response. **Choose one of the two options below.**
+Program slot 1 for HMAC-SHA1 challenge-response (replace `1` with `2` in the commands below to use slot 2). **Choose one of the two options below.**
 
 **Option A — random secret generated on the key.** The secret is never shown, so you cannot back it up or copy it to a second YubiKey:
 
 ```sh
-ykman otp chalresp --generate --touch 2
+ykman otp chalresp --generate --touch 1
 ```
 
 **Option B — your own secret (recommended).** This lets you back up the secret and program a spare key. See [Backup and recovery](#backup-and-recovery):
@@ -314,7 +316,7 @@ ykman otp chalresp --generate --touch 2
 ```sh
 SECRET=$(head -c 20 /dev/urandom | xxd -p -c 40)
 echo "$SECRET"          # write this down / store offline, then clear your terminal
-ykman otp chalresp --touch 2 "$SECRET"
+ykman otp chalresp --touch 1 "$SECRET"
 ```
 
 `--touch` makes every operation wait for a physical tap on the key. This is strongly recommended, because it stops malware from silently using the key while it is plugged in.
@@ -322,7 +324,7 @@ ykman otp chalresp --touch 2 "$SECRET"
 Test the slot:
 
 ```sh
-ykman otp calculate 2 $(head -c 32 /dev/urandom | xxd -p -c 64)
+ykman otp calculate 1 $(head -c 32 /dev/urandom | xxd -p -c 64)
 # → 40 hex characters
 ```
 
@@ -406,7 +408,7 @@ $ yks check
 [ok  ] yubikey    YubiKey 5C NFC (5.4.3) [OTP+FIDO+CCID] Serial: 87654321
 [ok  ] otp        Slot 1: programmed | Slot 2: programmed
 [ok  ] clipboard  pbcopy
-[ok  ] store      /Users/alice/.ykstore (default slot 2)
+[ok  ] store      /Users/alice/.ykstore (default slot 1)
 [ok  ] argon2     256 MiB, t=3, p=4
 [ok  ] entries    42, all at current settings
 [ok  ] agent      not running (starts automatically when needed)
@@ -569,8 +571,8 @@ yks d docs/passport > passport.pdf
 # Multi-line entry with metadata
 printf 'S3cr3t!\nuser: alice\nurl: https://example.com\n' | yks e web/example
 
-# Use slot 1 for this entry only
-yks -s 1 e test/slot1
+# Use slot 2 for this entry only
+yks -s 2 e test/slot2
 
 # Replace an existing entry
 yks -f e mail/work
@@ -608,7 +610,7 @@ Entry names:
 | Upgrade old entries to the current `.config` settings | `yks rekey` |
 | Raise the Argon2id cost | `yks rekey -m 512 -t 4` |
 | Change the master password | `yks rekey -p` |
-| Move to the other slot | `yks rekey -s 1` |
+| Move to the other slot | `yks rekey -s 2` |
 | Move to a different YubiKey (both plugged in) | `yks rekey -d <old serial> -new-device <new serial>` |
 
 Options can be combined, for example `yks rekey -p -m 512`.
@@ -660,7 +662,7 @@ To move to a **new YubiKey secret**, rekey onto a different slot or a different 
 `.config` is a plain `key=value` file:
 
 ```
-slot=2
+slot=1
 argon_t=3
 argon_m=262144
 argon_p=4
@@ -1016,7 +1018,7 @@ Recommended:
 1. Program the slot with **your own secret** (Option B in [YubiKey setup](#yubikey-setup)).
 2. Program a **second YubiKey** with the same secret and the same slot, and keep it somewhere safe:
    ```sh
-   ykman otp chalresp --touch 2 "$SECRET"
+   ykman otp chalresp --touch 1 "$SECRET"
    ```
 3. Store the secret offline, for example on paper or in a safe.
 4. Back up `~/.ykstore` by any means (git, rsync, cloud). The files are safe to store anywhere.
@@ -1033,7 +1035,7 @@ If a YubiKey or the HMAC secret backup may have been compromised, program a fres
 | Symptom | Cause / fix |
 |---|---|
 | `ykman otp calculate failed` | The slot is not set up for challenge-response (`ykman otp info`), the key is not connected, or the touch timed out. |
-| `no response in ykman output` | Your `ykman` may not read the challenge from stdin. Test it: `head -c 32 /dev/urandom \| xxd -p -c 64 \| ykman otp calculate 2` should print 40 hex characters. If it does not, set `YKS_CHALLENGE_ARG=1`. |
+| `no response in ykman output` | Your `ykman` may not read the challenge from stdin. Test it: `head -c 32 /dev/urandom \| xxd -p -c 64 \| ykman otp calculate 1` should print 40 hex characters. If it does not, set `YKS_CHALLENGE_ARG=1`. |
 | `decryption failed after 3 attempts: …` | Wrong password, a different YubiKey or secret, or the file was renamed or moved. Move it back to its original name, decrypt it, then re-encrypt it under the new name. |
 | Asked which YubiKey to use every time | Several keys are connected and no default is set. Add `device=<serial>` to `.config`, set `YKS_DEVICE`, or pass `-d`. See [Choosing a YubiKey](#choosing-a-yubikey). |
 | `several YubiKeys are connected but none reports a serial number` | Those keys do not report a serial number over USB, so `yks` cannot tell them apart. Unplug all but one. |

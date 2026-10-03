@@ -338,11 +338,14 @@ func cmdInit(args []string, slot int) error {
 		return err
 	}
 	for slot != 1 && slot != 2 {
-		s, err := prompt("Default YubiKey slot [1/2]: ")
-		if err != nil {
+		s, err := prompt("Default YubiKey slot [1/2, Enter = 1]: ")
+		if err != nil && strings.TrimSpace(s) == "" {
 			return err
 		}
-		slot, _ = strconv.Atoi(strings.TrimSpace(s))
+		if s = strings.TrimSpace(s); s == "" {
+			s = "1"
+		}
+		slot, _ = strconv.Atoi(s)
 	}
 	c := config{Slot: slot, KDF: k, Device: flagDevice, CacheTTL: -1}
 	if c.Device == "" {
