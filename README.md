@@ -165,7 +165,6 @@ go mod tidy       # first time without go.sum, or after changing imports; create
 
 ```sh
 gofmt -l .        # prints files that need formatting; fix with: gofmt -w .
-gofmt -w .
 go vet ./...
 ```
 
@@ -245,6 +244,34 @@ yks version
 yks check
 ```
 
+### Updating
+
+```sh
+yks update            # latest release
+yks update v0.4.0     # a specific tag (also: a branch name or a commit)
+```
+
+`yks update` needs the Go toolchain. It:
+
+1. builds the requested version with `go install github.com/fruh/yks@<version>` (with `-trimpath -ldflags="-s -w"`) into a temporary folder;
+2. runs the new binary once (`yks version`) to make sure it works;
+3. replaces the **currently running** `yks` in place, wherever it is installed (`/usr/local/bin`, `~/.local/bin`, `~/go/bin`, …), with an atomic rename;
+4. stops the cache agent, so the next command uses the new code. You will be asked for the master password once more.
+
+```
+$ yks update
+current: v0.3.0 (/usr/local/bin/yks)
+building github.com/fruh/yks@latest ...
+updated /usr/local/bin/yks: v0.3.0 -> v0.4.0
+```
+
+- If the installed version is already the requested one, nothing is replaced.
+- If `yks` lives in a folder you cannot write to, such as `/usr/local/bin`, the new binary is still built and kept, and `yks update` prints the `sudo install …` command to finish.
+- Go checks the downloaded source against its public checksum database (`sum.golang.org`), so a release tag whose contents were changed after publishing is rejected.
+- A new tag can take a few minutes to reach Go's module proxy. To skip the wait: `GOPROXY=direct yks update v0.4.0`.
+- On Linux, `CGO_ENABLED=0 yks update` gives a fully static binary, as in [Optional build flags](#optional-build-flags).
+- A fork updates from its own repository: `yks update` uses the module path the binary was built from.
+
 ### Repository layout
 
 | File | Contents |
@@ -255,6 +282,7 @@ yks check
 | `device.go` | choosing a YubiKey when several are connected |
 | `tree.go` | tree view, filters and entry selection |
 | `sync.go` | `yks sync`: commit, rebase on the upstream, push |
+| `update.go` | `yks update`: rebuild with `go install` and replace the binary |
 | `sys_linux.go` | peer-UID check and process hardening (Linux) |
 | `sys_darwin.go` | peer-UID check and process hardening (macOS) |
 | `go.mod`, `go.sum` | module definition and dependency checksums |
@@ -344,6 +372,7 @@ yks c github/personal -a
 | `forget` | Stops the cache agent immediately, wiping all cached keys. |
 | `check` | Checks dependencies, the YubiKey, the store and the agent, and reports what is missing. |
 | `rekey [-p] [-s 1\|2] [-new-device SERIAL] [-m MiB] [-t N]` | Re-encrypts every entry with the current or new settings. See [Re-encrypting the store](#re-encrypting-the-store-rekey). |
+| `update [version]` | Updates `yks` itself with `go install` and replaces the installed binary. See [Updating](#updating). |
 | `version` | Prints the version (the release tag when installed with `go install ...@vX.Y.Z`). |
 
 | Flag | Description |

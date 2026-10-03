@@ -113,6 +113,8 @@ func usage() {
   forget            stop the cache agent, wiping cached keys
   check             check dependencies, YubiKey, store and agent
   version           print version
+  update [version]  update yks itself with go install (default: latest;
+                    or a tag like v1.2.3), replacing the installed binary
   rekey [-p] [-s 1|2] [-new-device SERIAL] [-m MiB] [-t N]
                     re-encrypt every entry with the current (or new) settings:
                     -p new master password, -s new slot, -new-device YubiKey
@@ -229,6 +231,8 @@ func main() {
 			filter = a[1]
 		}
 		err = cmdList(filter)
+	case a[0] == "update" && len(a) <= 2:
+		err = cmdUpdate(a[1:])
 	case a[0] == "sync" && len(a) == 1:
 		err = cmdSync()
 	case a[0] == "forget" && len(a) == 1:
