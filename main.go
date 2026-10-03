@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -126,6 +127,8 @@ env:   YKS_DIR (default ~/.ykstore), YKS_CACHE_TTL seconds (default 300, 0 = off
        YKS_DEVICE default YubiKey serial (also: device= in .config),
        YKS_GIT=1/0 commit changes automatically if the store is a git repository
        (also git=1 in .config; the environment wins)
+       YKS_CHALLENGE_ARG=1 pass the challenge to ykman as an argument (visible
+       in ps) instead of on stdin; only for ykman versions that need it
 `)
 	os.Exit(2)
 }
@@ -768,10 +771,17 @@ func newAEAD(pk, seed []byte, slot int, dev string) (cipher.AEAD, error) {
 	return cipher.NewGCM(blk)
 }
 
-// Uses `ykman [--device SERIAL] otp calculate <slot> <hex>`. The challenge is
-// passed as an argument (visible in /proc), which is fine here: it is a one-way
-// function of pk, and the response alone does not yield the key.
-// Set YKS_DEVICE=<serial> to pick a specific YubiKey when several are plugged in.
+var (
+	respRe   = regexp.MustCompile(`\b[0-9a-fA-F]{40}\b`)
+	promptRe = regexp.MustCompile(`Enter a challenge[^:\n]*:\s?`)
+)
+
+// challengeResponse runs `ykman [--device SERIAL] otp calculate <slot>` and
+// writes the challenge to its stdin, where ykman's challenge prompt reads it.
+// Nothing secret-derived appears in the process list (ps, /proc/<pid>/cmdline).
+// YKS_CHALLENGE_ARG=1 passes the challenge as an argument instead, for ykman
+// versions that cannot read it from stdin. That exposure is harmless in this
+// design (the challenge is a one-way function of pk) but avoided by default.
 func challengeResponse(slot int, chal []byte, dev string) ([]byte, error) {
 	if dev == "" {
 		d, err := device()
@@ -780,17 +790,43 @@ func challengeResponse(slot int, chal []byte, dev string) ([]byte, error) {
 		}
 		dev = d
 	}
-	cmd := ykmanOn(dev, "otp", "calculate", strconv.Itoa(slot), hex.EncodeToString(chal))
-	cmd.Stderr = os.Stderr // ykman prints its own "Touch your YubiKey..." prompt here
+	hexChal := hex.EncodeToString(chal)
+	args := []string{"otp", "calculate", strconv.Itoa(slot)}
+	viaArg := os.Getenv("YKS_CHALLENGE_ARG") == "1"
+	if viaArg {
+		args = append(args, hexChal)
+	}
+	cmd := ykmanOn(dev, args...)
+	if !viaArg {
+		cmd.Stdin = strings.NewReader(hexChal + "\n")
+	}
+	// Show ykman's "Touch your YubiKey..." but not its challenge prompt.
+	cmd.Stderr = promptFilter{os.Stderr}
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("ykman otp calculate failed (slot %d configured for challenge-response?): %w", slot, err)
 	}
-	resp, err := hex.DecodeString(strings.TrimSpace(string(out)))
-	if err != nil || len(resp) != 20 {
-		return nil, errors.New("unexpected ykman output (expected 40 hex chars)")
+	// The response is the last 40-hex-digit word; a prompt may precede it.
+	m := respRe.FindAllString(string(out), -1)
+	if len(m) == 0 {
+		hint := ""
+		if !viaArg {
+			hint = "; if your ykman cannot read the challenge from stdin, set YKS_CHALLENGE_ARG=1"
+		}
+		return nil, errors.New("no response in ykman output (expected 40 hex characters)" + hint)
 	}
-	return resp, nil
+	return hex.DecodeString(m[len(m)-1])
+}
+
+// promptFilter removes ykman's "Enter a challenge (hex):" prompt from its
+// stderr and passes everything else through.
+type promptFilter struct{ w io.Writer }
+
+func (f promptFilter) Write(p []byte) (int, error) {
+	if _, err := f.w.Write(promptRe.ReplaceAll(p, nil)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 // ---------- password / input ----------

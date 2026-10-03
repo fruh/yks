@@ -565,6 +565,7 @@ Entry names:
 | `YKS_DIR` | `~/.ykstore` | Store location |
 | `YKS_CACHE_TTL` | `300` | Seconds to cache the master key (maximum 86400); `0` turns caching off. Overrides `cache_ttl=` in `.config` |
 | `YKS_DEVICE` | *(none)* | Default YubiKey serial when several are connected; overrides `device=` in `.config`, overridden by `-d` (see [Choosing a YubiKey](#choosing-a-yubikey)) |
+| `YKS_CHALLENGE_ARG` | *(off)* | `1` passes the challenge to `ykman` as a command-line argument (visible in `ps`) instead of on stdin. Only for `ykman` versions that cannot read it from stdin |
 | `YKS_GIT` | *(off)* | `1` commits every change automatically if the store is a git repository, `0` turns it off. Overrides `git=` in `.config` (see [History with git](#history-with-git)) |
 
 ---
@@ -841,7 +842,7 @@ Design decisions:
 - **Argon2 parameters are bounded when reading a file** (t ≤ 20, m ≤ 4 GiB, p ≤ 16). A malicious file cannot demand an unreasonable amount of work.
 - **An empty password is allowed**, which leaves the YubiKey as the only factor. This is convenient but weaker.
 
-Passing the challenge to `ykman` as a command-line argument makes it visible in `/proc`. This does not weaken the design: the challenge is a one-way function of `pk`, and the response it produces still cannot give the key without `pk`.
+**The challenge is passed to `ykman` on stdin**, not as a command-line argument, so it does not appear in `ps` or `/proc/<pid>/cmdline`. The response comes back over a private pipe. Even if the challenge were visible, it would not weaken the design: it is a one-way function of `pk`, and the response it produces still cannot give the key without `pk`. If your `ykman` cannot read the challenge from stdin, `YKS_CHALLENGE_ARG=1` falls back to passing it as an argument.
 
 ---
 
@@ -1003,7 +1004,7 @@ If a YubiKey or the HMAC secret backup may have been compromised, program a fres
 | Symptom | Cause / fix |
 |---|---|
 | `ykman otp calculate failed` | The slot is not set up for challenge-response (`ykman otp info`), the key is not connected, or the touch timed out. |
-| `unexpected ykman output` | Old `ykman` version, or an extra prompt. Run the test command from [YubiKey setup](#yubikey-setup) manually. |
+| `no response in ykman output` | Your `ykman` may not read the challenge from stdin. Test it: `head -c 32 /dev/urandom \| xxd -p -c 64 \| ykman otp calculate 2` should print 40 hex characters. If it does not, set `YKS_CHALLENGE_ARG=1`. |
 | `decryption failed after 3 attempts: …` | Wrong password, a different YubiKey or secret, or the file was renamed or moved. Move it back to its original name, decrypt it, then re-encrypt it under the new name. |
 | Asked which YubiKey to use every time | Several keys are connected and no default is set. Add `device=<serial>` to `.config`, set `YKS_DEVICE`, or pass `-d`. See [Choosing a YubiKey](#choosing-a-yubikey). |
 | `several YubiKeys are connected but none reports a serial number` | Those keys do not report a serial number over USB, so `yks` cannot tell them apart. Unplug all but one. |
