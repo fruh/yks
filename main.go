@@ -92,8 +92,9 @@ type config struct {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: yks <command> [args] [-s 1|2] [-d SERIAL] [-f] [-a]
-       (flags may go before or after the command; -- ends flags)
+	fmt.Fprint(os.Stderr, `usage: yks [command] [args] [-s 1|2] [-d SERIAL] [-f] [-a]
+       (flags may go before or after the command; -- ends flags;
+       no command: same as 'c', pick an entry and copy it)
   init [-m MiB] [-t N]
                     create the store and choose a default slot
                     (Argon2id memory, default 256 MiB; iterations, default 3)
@@ -103,15 +104,16 @@ func usage() {
                     (-a: copy the entire entry)
                     filter: exact name, or text matched anywhere in the path
                     (case-insensitive); one match is used directly, several
-                    are shown as a numbered tree; none: pick from all
+                    open the picker with the filter typed; none: pick from all
   rm [name]         remove entry after confirmation, -f skips it
-                    (exact name only; no name: pick from a numbered tree)
+                    (exact name only; no name: pick)
   ls [filter]       list entries as a tree (plain list when piped)
   sync              git store only: commit pending entry changes, pull
                     (rebase) from the upstream, push
   forget            stop the cache agent, wiping cached keys
   check             check dependencies, YubiKey, store and agent
   version           print version
+  help              print this text (also -h)
   update [version]  update yks itself with go install (default: latest;
                     or a tag like v1.2.3), replacing the installed binary
   rekey [-p] [-s 1|2] [-new-device SERIAL] [-m MiB] [-t N]
@@ -126,6 +128,8 @@ flags: -s slot for new entries (default from config),
 env:   YKS_DIR (default ~/.ykstore), YKS_CACHE_TTL seconds (default 300, 0 = off;
        also cache_ttl= in .config),
        YKS_DEVICE default YubiKey serial (also: device= in .config),
+       YKS_PICKER=plain numbered tree instead of the interactive entry picker
+       (=tree starts the picker in tree view),
        YKS_GIT=1/0 commit changes automatically if the store is a git repository
        (also git=1 in .config; the environment wins)
        YKS_BACKEND=pcsc|ykman how to talk to the YubiKey: built in over the
@@ -163,8 +167,8 @@ func main() {
 		die(err)
 	}
 	_ = fl.Parse(flags)
-	if len(a) == 0 {
-		usage()
+	if len(a) == 0 { // bare "yks" is the everyday case: pick an entry, copy it
+		a = []string{"c"}
 	}
 	// init and rekey parse their own flags (-m, -t, -p, -d); every other
 	// command takes only names, so a leftover "-x" is a typo, not an entry.
@@ -194,6 +198,8 @@ func main() {
 		die(err)
 	}
 	switch {
+	case a[0] == "help":
+		usage()
 	case a[0] == "version" && len(a) == 1:
 		fmt.Println("yks", versionString())
 	case a[0] == "check" && len(a) == 1:
@@ -223,7 +229,7 @@ func main() {
 		name := ""
 		if len(a) == 2 {
 			name = a[1]
-		} else if name, err = pickTree(nil, ""); err != nil {
+		} else if name, err = chooseEntry(nil, "", ""); err != nil {
 			break
 		}
 		err = cmdRemove(name, *force)

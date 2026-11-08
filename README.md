@@ -340,7 +340,7 @@ yks init                          # create ~/.ykstore, choose default slot (Argo
 yks e github/personal             # type a secret (hidden, entered twice)
 yks c github/personal             # copy it to the clipboard for 45 s
 yks d github/personal             # print it to stdout
-yks c                             # pick an entry from a numbered tree
+yks                               # same as 'yks c': pick an entry, copy it
 yks c git                         # filter: pick among entries matching "git"
 yks rm github/personal            # remove an entry (asks for confirmation)
 yks ls                            # show all entries as a tree
@@ -351,8 +351,10 @@ yks ls                            # show all entries as a tree
 ## Commands
 
 ```
-yks [-s 1|2] [-f] [-a] <command> [args]
+yks [-s 1|2] [-f] [-a] [command] [args]
 ```
+
+Without a command, `yks` behaves as `yks c`: the picker opens and the chosen entry's first line goes to the clipboard (`yks -a` copies the entire entry). The usage text is behind `yks help` or `yks -h`.
 
 Flags can go before or after the command, in any order. These are all the same:
 
@@ -368,7 +370,7 @@ yks c github/personal -a
 |---|---|
 | `init [-m MiB] [-t N]` | Creates the store directory and `.config`, and asks for the default slot (or takes it from `-s`). `-m` sets Argon2id memory (default 256 MiB), `-t` its iterations (default 3). |
 | `e <name> [file]` | Encrypts into entry `<name>`. The input is `file` if given; otherwise piped stdin; otherwise a hidden prompt, entered twice. Empty or whitespace-only input is refused, so a failed pipe cannot wipe an entry. |
-| `d [filter]` | Decrypts an entry to stdout. The filter is an exact name or text matched anywhere in the path; see [Selecting an entry](#selecting-an-entry-filters-and-the-tree-view). |
+| `d [filter]` | Decrypts an entry to stdout. The filter is an exact name or text matched anywhere in the path; see [Selecting an entry](#selecting-an-entry-filters-and-the-picker). |
 | `c [filter]` | Decrypts an entry and copies its **first line** to the clipboard, or the **entire entry** with `-a`. The clipboard is cleared after 45 seconds, if it still contains the secret. Takes a filter like `d`. |
 | `rm [name]` | Removes an entry after asking `Remove <name>? [y/N]`. Takes an exact name only; without one, shows the numbered tree. Needs no password or YubiKey. See [Removing entries](#removing-entries). |
 | `ls [filter]` | Lists entries as a tree, optionally filtered; one name per line when piped. |
@@ -378,6 +380,7 @@ yks c github/personal -a
 | `rekey [-p] [-s 1\|2] [-new-device SERIAL] [-m MiB] [-t N]` | Re-encrypts every entry with the current or new settings. See [Re-encrypting the store](#re-encrypting-the-store-rekey). |
 | `update [version]` | Updates `yks` itself with `go install` and replaces the installed binary. See [Updating](#updating). |
 | `version` | Prints the version (the release tag when installed with `go install ...@vX.Y.Z`). |
+| `help` | Prints the usage text (same as `-h`). Needed because a bare `yks` runs `c`. |
 
 | Flag | Description |
 |---|---|
@@ -510,31 +513,46 @@ removed mail/old
 
 The file is deleted normally, not overwritten. That is fine because it only ever contained ciphertext, but copies elsewhere remain: backups, and **git history**, from which the entry can still be restored (see [History with git](#history-with-git)).
 
-### Selecting an entry: filters and the tree view
+### Selecting an entry: filters and the picker
 
 For `d` and `c`, the argument is a **filter**, not just a name:
 
 | Argument | Result |
 |---|---|
-| none | a numbered tree of all entries |
+| none | the interactive picker over all entries |
 | an exact entry name | that entry, even if the name also appears inside other entries (`mail/work` wins over `mail/work-old`) |
 | text that matches **one** entry | that entry, used directly; `selected: name` is printed so you see which one |
-| text that matches **several** entries | a numbered tree of only the matches |
+| text that matches **several** entries | the picker, pre-filled with the text |
 | text that matches **nothing** | an error |
 
 The filter matches anywhere in the path, ignoring case: `git` matches `github/personal`, `work/GitLab` and `legacy/digit-pin`.
 
+**The picker** is a small list drawn in place on the terminal: type to narrow it down, move, press Enter.
+
 ```
-$ yks c git
-3 entries match "git":
-~/.ykstore
-├── github/
-│   ├── personal [1]
-│   └── work [2]
-└── work/
-    └── gitlab [3]
-Entry [1-3, Enter to cancel]: 2
-selected: github/work
+$ yks c gith
+~/.ykstore   484 entries   > gith▌
+▸ personal/github/p
+  personal/github/work
+  work/github-actions
+3 matches · ↑/↓ move · Enter select · Esc cancel · Tab complete · Ctrl-R tree
+```
+
+| Key | Action |
+|---|---|
+| any text | narrow the list; several words must all match (`git work` finds `work/github`) |
+| `↑` `↓`, Ctrl-P / Ctrl-N, PgUp / PgDn, Home / End | move |
+| Enter | choose the highlighted entry |
+| Tab | extend the filter to what all matches have in common (`pers` → `personal/github/`) |
+| Ctrl-R | switch between the flat list and the folder tree |
+| Ctrl-U | clear the filter |
+| Esc, Ctrl-C, Ctrl-D | cancel |
+
+Matches are ordered: an exact name first, then entries whose own name starts with the text, then the rest alphabetically. When you choose, the picker erases itself and leaves only the `selected: <full path>` line:
+
+```
+$ yks c gith
+selected: personal/github/p
 copied first line to clipboard, clearing in 45s
 
 $ yks c passp
@@ -543,12 +561,10 @@ copied first line to clipboard, clearing in 45s
 ```
 
 - After you choose, or when a filter picks the only match, `selected: <full path>` is printed, so you always see which entry is decrypted or copied. It goes to the terminal, so it shows even when output is redirected.
-- Each entry shows its number in brackets after the name, like `work [2]`. Folders end with `/` and have no number; only entries can be chosen.
-- An entry that is also a folder (`work` and `work/vpn`) is shown once, with its number and its contents below it.
-- Press Enter on an empty line, or Ctrl-D, to cancel. An invalid number asks again.
-- The tree and the prompt go to the terminal, not stdout, so redirecting still works: `yks d pass > passport.pdf` shows the tree on screen and writes only the decrypted file.
+- The picker and the prompt go to the terminal, not stdout, so redirecting still works: `yks d pass > passport.pdf` shows the picker on screen and writes only the decrypted file.
+- Without a terminal to draw on, or with `TERM=dumb`, `yks` falls back to the numbered tree it used before: every entry gets a number in brackets, like `work [2]`, and you type the number (Enter on an empty line or Ctrl-D cancels). `YKS_PICKER=plain` forces that mode; `YKS_PICKER=tree` starts the picker in tree view.
 - In scripts, use exact names. A filter that matches several entries needs a terminal to ask on.
-- `rm` deliberately takes only an **exact** name (or no name, for the tree), so a loose filter can never remove the wrong entry.
+- `rm` deliberately takes only an **exact** name (or no name, for the picker), so a loose filter can never remove the wrong entry.
 
 `yks ls` shows the same tree, without numbers, and accepts the same filter:
 
@@ -600,6 +616,7 @@ Entry names:
 | `YKS_DIR` | `~/.ykstore` | Store location |
 | `YKS_CACHE_TTL` | `300` | Seconds to cache the master key (maximum 86400); `0` turns caching off. Overrides `cache_ttl=` in `.config` |
 | `YKS_DEVICE` | *(none)* | Default YubiKey serial when several are connected; overrides `device=` in `.config`, overridden by `-d` (see [Choosing a YubiKey](#choosing-a-yubikey)) |
+| `YKS_PICKER` | *(auto)* | `plain`: the numbered tree instead of the interactive picker; `tree`: the picker starts in tree view (see [Selecting an entry](#selecting-an-entry-filters-and-the-picker)) |
 | `YKS_BACKEND` | *(auto)* | How to reach the YubiKey: `pcsc` (built in, over the smart card interface through the system PC/SC; macOS only) or `ykman`. By default the built-in backend is used where it works and `ykman` otherwise, see [Requirements](#requirements) |
 | `YKS_CHALLENGE_ARG` | *(off)* | `1` passes the challenge to `ykman` as a command-line argument (visible in `ps`) instead of on stdin. Only for `ykman` versions that cannot read it from stdin |
 | `YKS_GIT` | *(off)* | `1` commits every change automatically if the store is a git repository, `0` turns it off. Overrides `git=` in `.config` (see [History with git](#history-with-git)) |

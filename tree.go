@@ -29,10 +29,10 @@ func filterEntries(names []string, filter string) []string {
 }
 
 // resolveEntry turns the argument of d / c into one entry name:
-//   - no filter:         pick from a tree of all entries
+//   - no filter:         pick from all entries
 //   - exact entry name:  that entry, even if it also matches others
 //   - one match:         that entry (announced on the terminal)
-//   - several matches:   pick from a tree of the matches
+//   - several matches:   pick, with the filter pre-filled
 func resolveEntry(filter string) (string, error) {
 	names, err := listEntries()
 	if err != nil {
@@ -42,7 +42,7 @@ func resolveEntry(filter string) (string, error) {
 		return "", errors.New("store is empty")
 	}
 	if filter == "" {
-		return pickTree(names, "")
+		return chooseEntry(names, "", "")
 	}
 	if canon, _, err := entry(filter); err == nil {
 		for _, n := range names {
@@ -59,11 +59,12 @@ func resolveEntry(filter string) (string, error) {
 		announce(m[0])
 		return m[0], nil
 	}
-	return pickTree(m, fmt.Sprintf("%d entries match %q:", len(m), filter))
+	return chooseEntry(names, filter, fmt.Sprintf("%d entries match %q:", len(m), filter))
 }
 
 // pickTree shows names (all entries when nil) as a numbered tree on the
-// terminal and returns the chosen one.
+// terminal and returns the chosen one. It is the fallback for chooseEntry
+// when there is no usable terminal or YKS_PICKER=plain is set.
 func pickTree(names []string, header string) (string, error) {
 	if names == nil {
 		var err error
@@ -74,7 +75,13 @@ func pickTree(names []string, header string) (string, error) {
 			return "", errors.New("store is empty")
 		}
 	}
-	lines, order := renderTree(names, storeLabel(), true)
+	lines, entries := renderTree(names, storeLabel(), true)
+	var order []string // index-1 -> entry, in display order
+	for _, e := range entries {
+		if e != "" {
+			order = append(order, e)
+		}
+	}
 	t, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		return "", fmt.Errorf("cannot show the list (no terminal): give an exact entry name: %w", err)
@@ -153,17 +160,18 @@ type treeNode struct {
 	entry    string // full entry name if this node is an entry
 }
 
-// renderTree draws names as a tree. With numbered, each entry gets its index
-// in brackets after the name, and order maps index-1 to the entry name, in
-// the same order as displayed. An entry that is also a folder ("work" and
-// "work/vpn") is shown once, with its index and its children.
+// renderTree draws names as a tree. entries is aligned with lines and holds
+// the entry name of each line, "" for the root and for folders. With
+// numbered, each entry gets its index in brackets after the name, counting
+// in display order. An entry that is also a folder ("work" and "work/vpn")
+// is shown once, with its index and its children.
 //
 //	~/.ykstore
 //	├── github/
 //	│   ├── personal [1]
 //	│   └── work [2]
 //	└── test [3]
-func renderTree(names []string, rootLabel string, numbered bool) (lines, order []string) {
+func renderTree(names []string, rootLabel string, numbered bool) (lines, entries []string) {
 	root := &treeNode{children: map[string]*treeNode{}}
 	for _, n := range names {
 		cur := root
@@ -177,7 +185,8 @@ func renderTree(names []string, rootLabel string, numbered bool) (lines, order [
 		}
 		cur.entry = n
 	}
-	lines = append(lines, rootLabel)
+	lines, entries = append(lines, rootLabel), append(entries, "")
+	count := 0
 
 	var walk func(n *treeNode, prefix string)
 	walk = func(n *treeNode, prefix string) {
@@ -197,13 +206,13 @@ func renderTree(names []string, rootLabel string, numbered bool) (lines, order [
 				label += "/"
 			}
 			if c.entry != "" && numbered {
-				order = append(order, c.entry)
-				label += fmt.Sprintf(" [%d]", len(order))
+				count++
+				label += fmt.Sprintf(" [%d]", count)
 			}
-			lines = append(lines, prefix+branch+label)
+			lines, entries = append(lines, prefix+branch+label), append(entries, c.entry)
 			walk(c, prefix+indent)
 		}
 	}
 	walk(root, "")
-	return lines, order
+	return lines, entries
 }
