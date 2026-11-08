@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 func backendMode() string { return os.Getenv("YKS_BACKEND") }
@@ -49,12 +50,10 @@ type pcscKey struct {
 }
 
 func (k pcscKey) yubikey() yubikey {
-	desc := "YubiKey"
 	if k.err != nil {
-		desc += " (OTP application not reachable over CCID)"
-	} else {
-		desc += " " + k.status.firmware()
+		return yubikey{desc: "YubiKey [" + k.reader + "]: " + strings.TrimPrefix(k.err.Error(), errPCSCUnusable.Error()+": "), warn: true}
 	}
+	desc := "YubiKey " + k.status.firmware()
 	if k.serial != "" {
 		desc += " Serial: " + k.serial
 	}
@@ -87,13 +86,59 @@ func listYubiKeys() ([]yubikey, error) {
 	}
 	if pcscProbe() == nil {
 		keys, err := pcscListKeys()
-		if (err == nil && len(keys) > 0) || !haveYkman() {
+		if preferPCSCList(keys, err, haveYkman()) {
 			return pcscToYubikeys(keys), err
 		}
 	} else if !haveYkman() {
 		return nil, errors.New("ykman: " + hintYkman)
 	}
 	return ykmanList()
+}
+
+// countUsable: PC/SC keys whose OTP application answered.
+func countUsable(keys []pcscKey) int {
+	n := 0
+	for _, k := range keys {
+		if k.err == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// preferPCSCList decides whether the PC/SC listing is the one to show. A
+// YubiKey 5 on USB is listed by PC/SC but offers no OTP application there
+// (SW 6A82), so when no listed key is usable and ykman exists, ykman's list
+// is the truthful one. Without ykman the PC/SC list still shows the reason.
+func preferPCSCList(keys []pcscKey, err error, ykman bool) bool {
+	return (err == nil && countUsable(keys) > 0) || !ykman
+}
+
+// pcscKeyCount reports how many YubiKeys PC/SC lists and how many of them
+// answer on the OTP application; (0, 0) when PC/SC is unusable.
+func pcscKeyCount() (listed, usable int) {
+	keys, err := pcscListKeys()
+	if err != nil {
+		return 0, 0
+	}
+	return len(keys), countUsable(keys)
+}
+
+const hintInputMonitoring = "On macOS the YubiKey's keyboard (HID) interface, the only way to its slots over USB, " +
+	"needs the Input Monitoring permission for your terminal app (System Settings > Privacy & Security > Input Monitoring). " +
+	"After granting it, quit and reopen the terminal app; a new window is not enough. " +
+	"If no prompt ever appeared, 'tccutil reset ListenEvent' brings it back."
+
+// hidHint adds the macOS explanation when ykman's output shows it could
+// not open the YubiKey's HID interface. goos is a parameter for testing.
+func hidHint(err error, output, goos string) error {
+	if err == nil || goos != "darwin" {
+		return err
+	}
+	if !strings.Contains(output, "Failed opening device") && !strings.Contains(output, "Failed to connect to the device") {
+		return err
+	}
+	return fmt.Errorf("%w\n  ykman could not open the YubiKey's keyboard interface. %s", err, hintInputMonitoring)
 }
 
 // pcscSlotInfo reads the slot status of the key with serial dev ("" = the only one).
@@ -170,7 +215,7 @@ func challengeResponse(slot int, chal []byte, dev string) ([]byte, error) {
 	}
 	if !haveYkman() {
 		if perr != nil {
-			return nil, perr
+			return nil, fmt.Errorf("%v; ykman is not installed, and a YubiKey on USB needs it: %s", perr, hintYkman)
 		}
 		return nil, errors.New("ykman: " + hintYkman)
 	}

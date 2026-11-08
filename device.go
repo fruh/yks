@@ -20,6 +20,7 @@ var flagDevice string // set from -d / --device
 type yubikey struct {
 	serial string // empty if the key does not report one
 	desc   string // one line shown when asking which key to use
+	warn   bool   // connected but not usable; desc says why
 }
 
 func validSerial(s string) bool {

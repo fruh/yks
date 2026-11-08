@@ -143,6 +143,18 @@ func TestOTPSerial(t *testing.T) {
 	}
 }
 
+func TestPCSCKeyDesc(t *testing.T) {
+	k := pcscKey{reader: "Yubico YubiKey OTP+FIDO+CCID", serial: "9031410", status: otpStatus{version: [3]byte{5, 1, 2}}}
+	if y := k.yubikey(); y.warn || y.serial != "9031410" || y.desc != "YubiKey 5.1.2 Serial: 9031410 [Yubico YubiKey OTP+FIDO+CCID]" {
+		t.Fatalf("%+v", y)
+	}
+	k.err = errors.New(errPCSCUnusable.Error() + ": SCardConnect: sharing violation: another program holds the key (PC/SC 0x8010000B)")
+	y := k.yubikey()
+	if !y.warn || y.serial != "" || y.desc != "YubiKey [Yubico YubiKey OTP+FIDO+CCID]: SCardConnect: sharing violation: another program holds the key (PC/SC 0x8010000B)" {
+		t.Fatalf("the real error must be shown: %+v", y)
+	}
+}
+
 func TestOTPHMAC(t *testing.T) {
 	resp20 := bytes.Repeat([]byte{0xEE}, 20)
 	f := &fakeCard{reply: [][]byte{append(append([]byte{}, resp20...), 0x90, 0x00)}}

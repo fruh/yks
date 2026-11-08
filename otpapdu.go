@@ -188,7 +188,9 @@ func otpSelect(t transmitter) (otpStatus, error) {
 		return otpStatus{}, fmt.Errorf("%w: select OTP application: %v", errPCSCUnusable, err)
 	}
 	if sw != swOK {
-		return otpStatus{}, fmt.Errorf("%w: OTP application not available over CCID (SW %04X)", errPCSCUnusable, sw)
+		return otpStatus{}, fmt.Errorf("%w: OTP application not available over the smart card interface (SW %04X): "+
+			"over USB a YubiKey 5 offers its slots only through the keyboard (HID) interface, which ykman uses; over NFC this path works",
+			errPCSCUnusable, sw)
 	}
 	s, err := parseOTPStatus(resp)
 	if err != nil {

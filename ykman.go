@@ -5,6 +5,7 @@ package main
 // The ykman backend: everything that shells out to YubiKey Manager.
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,9 +13,19 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 )
+
+// exitStderrAll returns everything a failed command wrote to stderr.
+func exitStderrAll(err error) []byte {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.Stderr
+	}
+	return nil
+}
 
 const hintYkman = "install YubiKey Manager: 'brew install ykman' (macOS), 'apt install yubikey-manager' (Debian/Ubuntu), 'dnf install yubikey-manager' (Fedora), 'pacman -S yubikey-manager' (Arch)"
 
@@ -37,11 +48,25 @@ var (
 	serialRe = regexp.MustCompile(`Serial:\s*(\d+)`)
 )
 
+// exitStderr returns what a failed command wrote to stderr (captured by
+// Output), trimmed to its last line.
+func exitStderr(err error) string {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		lines := strings.Split(strings.TrimSpace(string(ee.Stderr)), "\n")
+		return strings.TrimSpace(lines[len(lines)-1])
+	}
+	return ""
+}
+
 // ykmanList parses `ykman list`.
 func ykmanList() ([]yubikey, error) {
 	out, err := exec.Command("ykman", "list").Output()
 	if err != nil {
-		return nil, fmt.Errorf("ykman list failed: %w", err)
+		if s := exitStderr(err); s != "" {
+			err = fmt.Errorf("%w: %s", err, s)
+		}
+		return nil, hidHint(fmt.Errorf("ykman list failed: %w", err), string(exitStderrAll(err)), runtime.GOOS)
 	}
 	var keys []yubikey
 	for _, l := range strings.Split(string(out), "\n") {
@@ -62,7 +87,7 @@ func ykmanSlotInfo(dev string) (slotInfo, error) {
 	out, err := ykmanOn(dev, "otp", "info").CombinedOutput()
 	text := strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSpace(string(out)), "\n", " | ")), " ")
 	if err != nil {
-		return slotInfo{}, errors.New(text)
+		return slotInfo{}, hidHint(errors.New(text), text, runtime.GOOS)
 	}
 	info := slotInfo{text: text}
 	for _, l := range strings.Split(string(out), "\n") {
@@ -92,11 +117,14 @@ func ykmanChallenge(slot int, chal []byte, dev string) ([]byte, error) {
 	if !viaArg {
 		cmd.Stdin = strings.NewReader(hexChal + "\n")
 	}
-	// Show ykman's "Touch your YubiKey..." but not its challenge prompt.
-	cmd.Stderr = promptFilter{os.Stderr}
+	// Show ykman's "Touch your YubiKey..." but not its challenge prompt;
+	// keep a copy to explain a failure.
+	var errOut bytes.Buffer
+	cmd.Stderr = io.MultiWriter(promptFilter{os.Stderr}, &errOut)
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("ykman otp calculate failed (slot %d configured for challenge-response?): %w", slot, err)
+		err = fmt.Errorf("ykman otp calculate failed (slot %d configured for challenge-response?): %w", slot, err)
+		return nil, hidHint(err, errOut.String(), runtime.GOOS)
 	}
 	// The response is the last 40-hex-digit word; a prompt may precede it.
 	m := respRe.FindAllString(string(out), -1)

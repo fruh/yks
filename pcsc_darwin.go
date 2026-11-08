@@ -14,11 +14,11 @@ package main
 // same slots answer over CCID, which needs neither.
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -74,9 +74,11 @@ func pcscLoad() (*pcscLib, error) {
 		}()
 		h, err := purego.Dlopen(pcscFramework, purego.RTLD_NOW|purego.RTLD_GLOBAL)
 		if err != nil {
+			pcscDebugf("dlopen %s: %v", pcscFramework, err)
 			pcscLoadErr = fmt.Errorf("%w: %v", errPCSCUnusable, err)
 			return
 		}
+		pcscDebugf("loaded %s", pcscFramework)
 		l := &pcscLib{}
 		purego.RegisterLibFunc(&l.establishContext, h, "SCardEstablishContext")
 		purego.RegisterLibFunc(&l.releaseContext, h, "SCardReleaseContext")
@@ -91,17 +93,41 @@ func pcscLoad() (*pcscLib, error) {
 	return pcscL, pcscLoadErr
 }
 
+var pcscErrText = map[uint32]string{
+	0x80100006: "insufficient buffer",
+	0x80100009: "unknown reader",
+	0x8010000A: "timeout",
+	0x8010000B: "sharing violation: another program holds the YubiKey's smart card interface. " +
+		"Usual suspects: GnuPG's scdaemon (run 'gpgconf --kill scdaemon', or put 'pcsc-shared' in ~/.gnupg/scdaemon.conf), " +
+		"Yubico Authenticator, or a browser; quit it and retry",
+	0x8010000C: "no smart card (YubiKey removed)",
+	0x8010000F: "protocol mismatch",
+	0x80100016: "not transacted",
+	0x80100017: "reader unavailable",
+	0x8010001D: "smart card service not running",
+	0x8010002E: "no readers available",
+	0x80100065: "unsupported card",
+	0x80100066: "unresponsive card",
+	0x80100067: "unpowered card",
+	0x80100068: "card was reset",
+	0x80100069: "card removed",
+}
+
 func pcscErr(op string, rc uint32) error {
-	msg := fmt.Sprintf("%s: PC/SC error 0x%08X", op, rc)
-	switch rc {
-	case scardENoService:
-		msg += " (smart card service not running)"
-	case scardESharingViolation:
-		msg += " (another application holds the YubiKey; close Yubico Authenticator or similar and retry)"
-	case scardWRemovedCard, scardENoSmartcard:
-		msg += " (YubiKey removed)"
+	if t, ok := pcscErrText[rc]; ok {
+		return fmt.Errorf("%s: %s (PC/SC 0x%08X)", op, t, rc)
 	}
-	return errors.New(msg)
+	return fmt.Errorf("%s: PC/SC error 0x%08X", op, rc)
+}
+
+// YKS_DEBUG=1 traces the PC/SC calls on stderr. Challenge and response
+// bytes are never printed: they derive from the master password.
+var pcscDebug = os.Getenv("YKS_DEBUG") == "1"
+
+func pcscDebugf(format string, a ...any) {
+	if pcscDebug {
+		fmt.Fprintf(os.Stderr, "yks pcsc: "+format+"\n", a...)
+	}
 }
 
 var (
@@ -135,8 +161,10 @@ func pcscOpen() (*pcscCtx, error) {
 	}
 	var h int32
 	if rc := l.establishContext(scardScopeSystem, 0, 0, &h); rc != 0 {
+		pcscDebugf("SCardEstablishContext: 0x%08X", rc)
 		return nil, fmt.Errorf("%w: %v", errPCSCUnusable, pcscErr("SCardEstablishContext", rc))
 	}
+	pcscDebugf("SCardEstablishContext ok")
 	return &pcscCtx{l, h}, nil
 }
 
@@ -158,7 +186,9 @@ func (c *pcscCtx) yubikeyReaders() ([]string, error) {
 	}
 	var out []string
 	for _, r := range parseMultiString(buf[:n]) {
-		if strings.Contains(strings.ToLower(r), ykReaderName) {
+		yk := strings.Contains(strings.ToLower(r), ykReaderName)
+		pcscDebugf("reader %q (YubiKey: %v)", r, yk)
+		if yk {
 			out = append(out, r)
 		}
 	}
@@ -177,12 +207,25 @@ func (c *pcscCtx) connect(reader string) (*pcscCard, error) {
 	name := append([]byte(reader), 0)
 	var h int32
 	var proto uint32
-	rc := c.l.connect(c.h, &name[0], scardShareShared, scardProtocolT0|scardProtocolT1, &h, &proto)
+	var rc uint32
+	// Other programs (scdaemon, Yubico Authenticator) hold the card only
+	// while they talk to it; a few short retries often get in between.
+	for attempt := 0; ; attempt++ {
+		rc = c.l.connect(c.h, &name[0], scardShareShared, scardProtocolT0|scardProtocolT1, &h, &proto)
+		if rc != scardESharingViolation || attempt == 5 {
+			break
+		}
+		pcscDebugf("SCardConnect %q: sharing violation, retrying", reader)
+		time.Sleep(200 * time.Millisecond)
+	}
 	if rc != 0 {
+		pcscDebugf("SCardConnect %q: 0x%08X", reader, rc)
 		return nil, fmt.Errorf("%w: %v", errPCSCUnusable, pcscErr("SCardConnect", rc))
 	}
+	pcscDebugf("SCardConnect %q ok, protocol T=%d", reader, proto-1)
 	card := &pcscCard{c.l, h, scardIORequest{proto, uint32(unsafe.Sizeof(scardIORequest{}))}}
 	if rc = c.l.beginTransaction(h); rc != 0 {
+		pcscDebugf("SCardBeginTransaction: 0x%08X", rc)
 		card.l.disconnect(h, scardLeaveCard)
 		return nil, fmt.Errorf("%w: %v", errPCSCUnusable, pcscErr("SCardBeginTransaction", rc))
 	}
@@ -196,11 +239,22 @@ func (c *pcscCard) close() {
 
 // transmit implements transmitter: one APDU, raw reply including the SW.
 func (c *pcscCard) transmit(a []byte) ([]byte, error) {
+	if pcscDebug {
+		if len(a) >= 4 && a[1] == insConfig && (a[2] == slotChalHMAC1 || a[2] == slotChalHMAC2) {
+			pcscDebugf("-> % X ... (%d bytes, challenge not shown)", a[:4], len(a))
+		} else {
+			pcscDebugf("-> % X", a)
+		}
+	}
 	recv := make([]byte, 258) // 256 data + SW
 	n := uint32(len(recv))
 	rc := c.l.transmit(c.h, &c.pci, &a[0], uint32(len(a)), nil, &recv[0], &n)
 	if rc != 0 {
+		pcscDebugf("SCardTransmit: 0x%08X", rc)
 		return nil, pcscErr("SCardTransmit", rc)
+	}
+	if pcscDebug && n >= 2 {
+		pcscDebugf("<- %d bytes, SW %02X%02X", n-2, recv[n-2], recv[n-1])
 	}
 	return recv[:n], nil
 }
@@ -214,9 +268,11 @@ func (c *pcscCtx) probe(reader string) (string, otpStatus, error) {
 	defer card.close()
 	st, err := otpSelect(card)
 	if err != nil {
+		pcscDebugf("%q: %v", reader, err)
 		return "", otpStatus{}, err
 	}
 	serial, err := otpSerial(card)
+	pcscDebugf("%q: firmware %s, serial %q, %s, %s", reader, st.firmware(), serial, st.slotLine(1), st.slotLine(2))
 	return serial, st, err
 }
 
