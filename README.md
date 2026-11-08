@@ -41,11 +41,13 @@
 | Dependency | Purpose |
 |---|---|
 | Go ≥ 1.22 | installing / building |
-| `ykman` (YubiKey Manager CLI) | challenge-response with the YubiKey |
+| `ykman` (YubiKey Manager CLI) | programming a slot (once); the challenge-response itself on Linux. On macOS `yks` talks to the YubiKey directly and `ykman` is optional, see below |
 | `wl-copy`/`wl-paste` (Wayland), `xclip` (X11) or `pbcopy`/`pbpaste` (macOS) | the `c` command only |
 | Linux or macOS | the only supported platforms |
 
-Install `ykman`:
+**How `yks` talks to the YubiKey.** The challenge-response slots can be reached two ways: over the USB keyboard interface (HID), which is what `ykman otp` uses, and over the smart card interface (CCID), which is how NFC works. On macOS, `yks` uses the system's own `PCSC.framework` to reach the slots over CCID directly, with no helper installed. That also sidesteps the macOS *Input Monitoring* permission, which guards the HID path and shows up as `WARNING: Failed opening device` from `ykman`. On Linux, and whenever the built-in path finds no key, `yks` runs `ykman`. Both paths give the same response to the same challenge, so a store works unchanged on either. `YKS_BACKEND=pcsc` or `YKS_BACKEND=ykman` forces one of them; `yks check` shows which is active.
+
+Install `ykman` (needed to program a slot, and for `e`/`d`/`c` on Linux):
 
 ```sh
 # Debian/Ubuntu
@@ -143,7 +145,7 @@ Use this to build from a local copy, for example to try changes before pushing, 
 
 ```sh
 go version        # needs go1.22 or newer
-ykman --version   # YubiKey Manager, see Requirements
+ykman --version   # YubiKey Manager, see Requirements (optional on macOS)
 ```
 
 **2. Get the source**
@@ -390,8 +392,8 @@ Before `e`, `d` or `c` does anything else — before asking for a password — `
 
 | Command | Needs |
 |---|---|
-| `e`, `d` | `ykman` |
-| `c` | `ykman` and a clipboard pair: `wl-copy` + `wl-paste` (Wayland), `xclip` (X11) or `pbcopy` + `pbpaste` (macOS) |
+| `e`, `d` | a way to reach the YubiKey: the built-in backend (macOS) or `ykman` |
+| `c` | the same, plus a clipboard pair: `wl-copy` + `wl-paste` (Wayland), `xclip` (X11) or `pbcopy` + `pbpaste` (macOS) |
 
 If something is missing, it stops with install instructions:
 
@@ -404,9 +406,10 @@ yks: missing dependencies (run 'yks check' for details):
 
 ```
 $ yks check
+[ok  ] backend    PC/SC (PCSC.framework), ykman as fallback
 [ok  ] ykman      YubiKey Manager (ykman) version: 5.5.1
-[ok  ] yubikey    YubiKey 5C NFC (5.4.3) [OTP+FIDO+CCID] Serial: 87654321
-[ok  ] otp        Slot 1: programmed | Slot 2: programmed
+[ok  ] yubikey    YubiKey 5.4.3 Serial: 87654321 [Yubico YubiKey OTP+FIDO+CCID]
+[ok  ] otp        Slot 1: programmed, touch | Slot 2: programmed
 [ok  ] clipboard  pbcopy
 [ok  ] store      /Users/alice/.ykstore (default slot 1)
 [ok  ] argon2     256 MiB, t=3, p=4
@@ -416,8 +419,9 @@ $ yks check
 
 | Check | Fails when | Level |
 |---|---|---|
-| ykman | not installed | FAIL |
-| yubikey | none plugged in, or `ykman list` fails | FAIL |
+| backend | `YKS_BACKEND` is invalid, or is `pcsc` on a machine where PC/SC is unavailable; otherwise shows the active backend | FAIL |
+| ykman | not installed and the built-in backend is unavailable (on macOS, where it is only needed to program a slot, this is a warning) | FAIL / warn |
+| yubikey | none plugged in, or the key cannot be listed | FAIL |
 | otp | the selected (or only) key's OTP application cannot be read | FAIL |
 | device | the default key (from `-d`, `YKS_DEVICE` or `.config`) is not connected, or several keys are connected with no default | warn |
 | slot | the default slot from `.config` is empty | FAIL |
@@ -432,7 +436,7 @@ $ yks check
 | remote | the store is a git repository without an upstream branch (`yks sync` needs one) | warn |
 | clutter | hidden files or folders other than `.config`, `.gitignore` and `.git` are in the store (for example macOS `._*` files) | warn |
 
-`ykman` only reports whether a slot is *programmed*, not whether it holds a challenge-response credential. A slot holding Yubico OTP passes `check`, but decryption then fails with `ykman otp calculate failed`.
+The `otp` line only reports whether a slot is *programmed* (and whether it requires a touch), not whether it holds a challenge-response credential. A slot holding Yubico OTP passes `check`, but decryption then fails with `not configured for HMAC-SHA1 challenge-response` (built-in backend) or `ykman otp calculate failed`.
 
 ### Choosing a YubiKey
 
@@ -458,7 +462,7 @@ tip: skip this question with -d 12345678, YKS_DEVICE=12345678, or device=1234567
 Master password for test:
 ```
 
-To set a permanent default, add `device=<serial>` to `.config`, or pass `-d` to `yks init`. When you run `yks init` with several keys connected, it offers to set one as the default. Find the serials with `ykman list --serials`.
+To set a permanent default, add `device=<serial>` to `.config`, or pass `-d` to `yks init`. When you run `yks init` with several keys connected, it offers to set one as the default. `yks check` lists the connected keys with their serials.
 
 If your backup key carries the **same** HMAC secret, either key opens every entry, so the choice only decides which one you tap.
 
@@ -596,6 +600,7 @@ Entry names:
 | `YKS_DIR` | `~/.ykstore` | Store location |
 | `YKS_CACHE_TTL` | `300` | Seconds to cache the master key (maximum 86400); `0` turns caching off. Overrides `cache_ttl=` in `.config` |
 | `YKS_DEVICE` | *(none)* | Default YubiKey serial when several are connected; overrides `device=` in `.config`, overridden by `-d` (see [Choosing a YubiKey](#choosing-a-yubikey)) |
+| `YKS_BACKEND` | *(auto)* | How to reach the YubiKey: `pcsc` (built in, over the smart card interface through the system PC/SC; macOS only) or `ykman`. By default the built-in backend is used where it works and `ykman` otherwise, see [Requirements](#requirements) |
 | `YKS_CHALLENGE_ARG` | *(off)* | `1` passes the challenge to `ykman` as a command-line argument (visible in `ps`) instead of on stdin. Only for `ykman` versions that cannot read it from stdin |
 | `YKS_GIT` | *(off)* | `1` commits every change automatically if the store is a git repository, `0` turns it off. Overrides `git=` in `.config` (see [History with git](#history-with-git)) |
 
@@ -873,7 +878,7 @@ Design decisions:
 - **Argon2 parameters are bounded when reading a file** (t ≤ 20, m ≤ 4 GiB, p ≤ 16). A malicious file cannot demand an unreasonable amount of work.
 - **An empty password is allowed**, which leaves the YubiKey as the only factor. This is convenient but weaker.
 
-**The challenge is passed to `ykman` on stdin**, not as a command-line argument, so it does not appear in `ps` or `/proc/<pid>/cmdline`. The response comes back over a private pipe. Even if the challenge were visible, it would not weaken the design: it is a one-way function of `pk`, and the response it produces still cannot give the key without `pk`. If your `ykman` cannot read the challenge from stdin, `YKS_CHALLENGE_ARG=1` falls back to passing it as an argument.
+**The challenge never appears in the process list.** With the built-in backend it goes straight to the key over the smart card interface, inside the process. With `ykman` it is passed on stdin, not as a command-line argument, so it does not appear in `ps` or `/proc/<pid>/cmdline`, and the response comes back over a private pipe. Even if the challenge were visible, it would not weaken the design: it is a one-way function of `pk`, and the response it produces still cannot give the key without `pk`. If your `ykman` cannot read the challenge from stdin, `YKS_CHALLENGE_ARG=1` falls back to passing it as an argument.
 
 ---
 
@@ -953,7 +958,7 @@ Master password for work/legacy: ****
 copied first line to clipboard, clearing in 45s
 ```
 
-Each attempt costs one YubiKey operation, so with `--touch` you tap once per attempt. A wrong YubiKey or a tampered file also looks like a wrong password, which is why the attempts are limited. If `ykman` itself fails (for example, no key plugged in), `yks` stops immediately instead of asking again.
+Each attempt costs one YubiKey operation, so with `--touch` you tap once per attempt. A wrong YubiKey or a tampered file also looks like a wrong password, which is why the attempts are limited. If the YubiKey cannot be reached at all (for example, none is plugged in), `yks` stops immediately instead of asking again.
 
 New entries (`e`) always use the store-wide cached key if there is one. To write an entry with a different password, run `yks forget` first. `yks rekey` brings all entries back to one password.
 
@@ -1034,6 +1039,9 @@ If a YubiKey or the HMAC secret backup may have been compromised, program a fres
 
 | Symptom | Cause / fix |
 |---|---|
+| `WARNING: Failed opening device` (from `ykman`, macOS) | `ykman` cannot open the key's keyboard (HID) interface. Usually the terminal lacks the *Input Monitoring* permission (System Settings → Privacy & Security), or another app such as Yubico Authenticator holds the device. `yks` avoids this path on macOS by default (`yks check` should show `backend PC/SC`); if you forced `YKS_BACKEND=ykman`, unset it. |
+| `slot N is empty`, `not configured for HMAC-SHA1 challenge-response`, `touch timed out` | Built-in backend: the slot holds nothing, or something other than a challenge-response credential (see [YubiKey setup](#yubikey-setup)), or you did not touch the key in time. |
+| `another application holds the YubiKey` | Built-in backend: some other program has the smart card interface open exclusively. Close Yubico Authenticator or similar tools and retry. |
 | `ykman otp calculate failed` | The slot is not set up for challenge-response (`ykman otp info`), the key is not connected, or the touch timed out. |
 | `no response in ykman output` | Your `ykman` may not read the challenge from stdin. Test it: `head -c 32 /dev/urandom \| xxd -p -c 64 \| ykman otp calculate 1` should print 40 hex characters. If it does not, set `YKS_CHALLENGE_ARG=1`. |
 | `decryption failed after 3 attempts: …` | Wrong password, a different YubiKey or secret, or the file was renamed or moved. Move it back to its original name, decrypt it, then re-encrypt it under the new name. |

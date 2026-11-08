@@ -32,7 +32,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -121,7 +120,7 @@ func usage() {
                     to encrypt with (-d picks the one to decrypt with),
                     -m/-t new Argon2id settings
 flags: -s slot for new entries (default from config),
-       -d, --device SERIAL  YubiKey to use (see: ykman list --serials),
+       -d, --device SERIAL  YubiKey to use (serials: yks check),
        -f overwrite on 'e', no confirmation on 'rm',
        -a copy the entire entry with 'c'
 env:   YKS_DIR (default ~/.ykstore), YKS_CACHE_TTL seconds (default 300, 0 = off;
@@ -129,6 +128,9 @@ env:   YKS_DIR (default ~/.ykstore), YKS_CACHE_TTL seconds (default 300, 0 = off
        YKS_DEVICE default YubiKey serial (also: device= in .config),
        YKS_GIT=1/0 commit changes automatically if the store is a git repository
        (also git=1 in .config; the environment wins)
+       YKS_BACKEND=pcsc|ykman how to talk to the YubiKey: built in over the
+       smart card interface (macOS only) or through ykman; default: built in
+       where it works, ykman otherwise
        YKS_CHALLENGE_ARG=1 pass the challenge to ykman as an argument (visible
        in ps) instead of on stdin; only for ykman versions that need it
 `)
@@ -180,7 +182,7 @@ func main() {
 		die(errors.New("slot must be 1 or 2"))
 	}
 	if flagDevice != "" && !validSerial(flagDevice) {
-		die(fmt.Errorf("invalid YubiKey serial %q (see: ykman list --serials)", flagDevice))
+		die(fmt.Errorf("invalid YubiKey serial %q (serials: yks check)", flagDevice))
 	}
 	switch a[0] {
 	case "e", "d", "rekey":
@@ -778,64 +780,6 @@ func newAEAD(pk, seed []byte, slot int, dev string) (cipher.AEAD, error) {
 	return cipher.NewGCM(blk)
 }
 
-var (
-	respRe   = regexp.MustCompile(`\b[0-9a-fA-F]{40}\b`)
-	promptRe = regexp.MustCompile(`Enter a challenge[^:\n]*:\s?`)
-)
-
-// challengeResponse runs `ykman [--device SERIAL] otp calculate <slot>` and
-// writes the challenge to its stdin, where ykman's challenge prompt reads it.
-// Nothing secret-derived appears in the process list (ps, /proc/<pid>/cmdline).
-// YKS_CHALLENGE_ARG=1 passes the challenge as an argument instead, for ykman
-// versions that cannot read it from stdin. That exposure is harmless in this
-// design (the challenge is a one-way function of pk) but avoided by default.
-func challengeResponse(slot int, chal []byte, dev string) ([]byte, error) {
-	if dev == "" {
-		d, err := device()
-		if err != nil {
-			return nil, err
-		}
-		dev = d
-	}
-	hexChal := hex.EncodeToString(chal)
-	args := []string{"otp", "calculate", strconv.Itoa(slot)}
-	viaArg := os.Getenv("YKS_CHALLENGE_ARG") == "1"
-	if viaArg {
-		args = append(args, hexChal)
-	}
-	cmd := ykmanOn(dev, args...)
-	if !viaArg {
-		cmd.Stdin = strings.NewReader(hexChal + "\n")
-	}
-	// Show ykman's "Touch your YubiKey..." but not its challenge prompt.
-	cmd.Stderr = promptFilter{os.Stderr}
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("ykman otp calculate failed (slot %d configured for challenge-response?): %w", slot, err)
-	}
-	// The response is the last 40-hex-digit word; a prompt may precede it.
-	m := respRe.FindAllString(string(out), -1)
-	if len(m) == 0 {
-		hint := ""
-		if !viaArg {
-			hint = "; if your ykman cannot read the challenge from stdin, set YKS_CHALLENGE_ARG=1"
-		}
-		return nil, errors.New("no response in ykman output (expected 40 hex characters)" + hint)
-	}
-	return hex.DecodeString(m[len(m)-1])
-}
-
-// promptFilter removes ykman's "Enter a challenge (hex):" prompt from its
-// stderr and passes everything else through.
-type promptFilter struct{ w io.Writer }
-
-func (f promptFilter) Write(p []byte) (int, error) {
-	if _, err := f.w.Write(promptRe.ReplaceAll(p, nil)); err != nil {
-		return 0, err
-	}
-	return len(p), nil
-}
-
 // ---------- password / input ----------
 
 func cacheTTL() int {
@@ -1039,26 +983,20 @@ func versionString() string {
 
 // ---------- dependencies ----------
 
-const (
-	hintYkman = "install YubiKey Manager: 'brew install ykman' (macOS), 'apt install yubikey-manager' (Debian/Ubuntu), 'dnf install yubikey-manager' (Fedora), 'pacman -S yubikey-manager' (Arch)"
-	hintClip  = "install 'wl-clipboard' (Wayland) or 'xclip' (X11); macOS has pbcopy built in"
-)
-
-// ykman builds an ykman command that needs no particular YubiKey.
-func ykman(args ...string) *exec.Cmd { return ykmanOn("", args...) }
-
-// ykmanOn targets the YubiKey with serial dev ("" = let ykman choose).
-func ykmanOn(dev string, args ...string) *exec.Cmd {
-	if dev != "" {
-		args = append([]string{"--device", dev}, args...)
-	}
-	return exec.Command("ykman", args...)
-}
+const hintClip = "install 'wl-clipboard' (Wayland) or 'xclip' (X11); macOS has pbcopy built in"
 
 // requireDeps fails fast, before any password prompt, if a needed tool is missing.
 func requireDeps(clip bool) error {
+	if err := checkBackendEnv(); err != nil {
+		return err
+	}
+	if backendMode() == "pcsc" {
+		if err := pcscProbe(); err != nil {
+			return fmt.Errorf("YKS_BACKEND=pcsc but %v", err)
+		}
+	}
 	var missing []string
-	if _, err := exec.LookPath("ykman"); err != nil {
+	if !backendUsable() {
 		missing = append(missing, "ykman: "+hintYkman)
 	}
 	if clip {
@@ -1084,12 +1022,34 @@ func cmdCheck() error {
 	}
 
 	report("ok", "yks", versionString())
-	var otpInfo string
-	if _, err := exec.LookPath("ykman"); err != nil {
-		report("FAIL", "ykman", "not found; "+hintYkman)
-	} else {
+	mode, perr, ykOK := backendMode(), pcscProbe(), haveYkman()
+	switch {
+	case checkBackendEnv() != nil:
+		report("FAIL", "backend", checkBackendEnv().Error())
+	case mode == "pcsc" && perr != nil:
+		report("FAIL", "backend", "YKS_BACKEND=pcsc but "+perr.Error())
+	case mode == "pcsc":
+		report("ok", "backend", pcscBackendName+" (from YKS_BACKEND)")
+	case mode == "ykman":
+		report("ok", "backend", "ykman (from YKS_BACKEND)")
+	case perr == nil && ykOK:
+		report("ok", "backend", pcscBackendName+", ykman as fallback")
+	case perr == nil:
+		report("ok", "backend", pcscBackendName)
+	default:
+		report("ok", "backend", "ykman")
+	}
+	switch {
+	case ykOK:
 		v, _ := ykman("--version").Output()
 		report("ok", "ykman", strings.TrimSpace(string(v)))
+	case usePCSC():
+		report("warn", "ykman", "not installed; not needed for e/d/c here, only to program a slot; "+hintYkman)
+	default:
+		report("FAIL", "ykman", "not found; "+hintYkman)
+	}
+	var slots slotInfo
+	if backendUsable() {
 		keys, err := listYubiKeys()
 		def, src := defaultDevice()
 		target := def
@@ -1114,13 +1074,10 @@ func cmdCheck() error {
 				report("warn", "device", "several connected and no default: yks asks each time; set -d, YKS_DEVICE or device= in .config")
 			}
 			if target != "" || len(keys) == 1 {
-				out, err := ykmanOn(target, "otp", "info").CombinedOutput()
-				info := strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSpace(string(out)), "\n", " | ")), " ")
-				if err != nil {
-					report("FAIL", "otp", "not usable: "+info)
+				if slots, err = otpSlots(target); err != nil {
+					report("FAIL", "otp", "not usable: "+err.Error())
 				} else {
-					otpInfo = string(out)
-					report("ok", "otp", info)
+					report("ok", "otp", slots.text)
 				}
 			}
 		}
@@ -1203,10 +1160,8 @@ func cmdCheck() error {
 			report("warn", "clutter", fmt.Sprintf("%d hidden files/folders ignored (e.g. %s); review, then delete, e.g.: find %q \\( -name '._*' -o -name .DS_Store \\) -delete",
 				len(junk), ex, storeDir()))
 		}
-		for _, l := range strings.Split(otpInfo, "\n") {
-			if strings.HasPrefix(l, fmt.Sprintf("Slot %d:", c.Slot)) && strings.Contains(l, "empty") {
-				report("FAIL", "slot", fmt.Sprintf("default slot %d is empty; see 'YubiKey setup' in README", c.Slot))
-			}
+		if slots.empty[c.Slot] {
+			report("FAIL", "slot", fmt.Sprintf("default slot %d is empty; see 'YubiKey setup' in README", c.Slot))
 		}
 	}
 

@@ -6,9 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"regexp"
-	"strings"
 )
 
 // Which YubiKey to use, in order of precedence:
@@ -22,10 +19,8 @@ var flagDevice string // set from -d / --device
 
 type yubikey struct {
 	serial string // empty if the key does not report one
-	desc   string // the line from `ykman list`
+	desc   string // one line shown when asking which key to use
 }
-
-var serialRe = regexp.MustCompile(`Serial:\s*(\d+)`)
 
 func validSerial(s string) bool {
 	if s == "" || len(s) > 12 {
@@ -37,25 +32,6 @@ func validSerial(s string) bool {
 		}
 	}
 	return true
-}
-
-func listYubiKeys() ([]yubikey, error) {
-	out, err := exec.Command("ykman", "list").Output()
-	if err != nil {
-		return nil, fmt.Errorf("ykman list failed: %w", err)
-	}
-	var keys []yubikey
-	for _, l := range strings.Split(string(out), "\n") {
-		if l = strings.TrimSpace(l); l == "" {
-			continue
-		}
-		k := yubikey{desc: l}
-		if m := serialRe.FindStringSubmatch(l); m != nil {
-			k.serial = m[1]
-		}
-		keys = append(keys, k)
-	}
-	return keys, nil
 }
 
 // defaultDevice returns the configured device (flag, env, .config) and where
@@ -78,7 +54,7 @@ var (
 	deviceResolved bool
 )
 
-// device returns the serial to pass to ykman ("" = the only connected key).
+// device returns the serial of the key to use ("" = the only connected key).
 // With several keys connected and no default, it asks once per command.
 func device() (string, error) {
 	if deviceResolved {
@@ -96,7 +72,7 @@ func device() (string, error) {
 		switch len(keys) {
 		case 0:
 			return "", errors.New("no YubiKey detected: plug one in")
-		case 1: // ykman picks it; no --device needed
+		case 1: // the backend picks it; no serial needed
 		default:
 			if d, err = pickYubiKey(keys, false); err != nil {
 				return "", err
