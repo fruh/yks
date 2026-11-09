@@ -132,10 +132,6 @@ env:   YKS_DIR (default ~/.ykstore), YKS_CACHE_TTL seconds (default 300, 0 = off
        (=tree starts the picker in tree view),
        YKS_GIT=1/0 commit changes automatically if the store is a git repository
        (also git=1 in .config; the environment wins)
-       YKS_BACKEND=pcsc|ykman how to talk to the YubiKey: built in over the
-       smart card interface (macOS only) or through ykman; default: built in
-       where it works, ykman otherwise
-       YKS_DEBUG=1 trace the built-in backend's PC/SC calls on stderr
        YKS_CHALLENGE_ARG=1 pass the challenge to ykman as an argument (visible
        in ps) instead of on stdin; only for ykman versions that need it
 `)
@@ -994,16 +990,8 @@ const hintClip = "install 'wl-clipboard' (Wayland) or 'xclip' (X11); macOS has p
 
 // requireDeps fails fast, before any password prompt, if a needed tool is missing.
 func requireDeps(clip bool) error {
-	if err := checkBackendEnv(); err != nil {
-		return err
-	}
-	if backendMode() == "pcsc" {
-		if err := pcscProbe(); err != nil {
-			return fmt.Errorf("YKS_BACKEND=pcsc but %v", err)
-		}
-	}
 	var missing []string
-	if !backendUsable() {
+	if !haveYkman() {
 		missing = append(missing, "ykman: "+hintYkman)
 	}
 	if clip {
@@ -1029,46 +1017,12 @@ func cmdCheck() error {
 	}
 
 	report("ok", "yks", versionString())
-	mode, perr, ykOK := backendMode(), pcscProbe(), haveYkman()
-	var pn, pu int // YubiKeys PC/SC lists, and how many answer on the OTP application
-	if perr == nil {
-		pn, pu = pcscKeyCount()
-	}
-	usbOnly := pn > 0 && pu == 0 // listed, but no OTP application over CCID: a YubiKey 5 on USB
-	const usbNote = "PC/SC works, but this key offers no OTP application over USB CCID; that is normal for a YubiKey 5 on USB, whose slots are reached through its keyboard interface"
-	switch {
-	case checkBackendEnv() != nil:
-		report("FAIL", "backend", checkBackendEnv().Error())
-	case mode == "pcsc" && perr != nil:
-		report("FAIL", "backend", "YKS_BACKEND=pcsc but "+perr.Error())
-	case mode == "pcsc" && usbOnly:
-		report("FAIL", "backend", "YKS_BACKEND=pcsc, but "+usbNote+"; unset YKS_BACKEND to use ykman")
-	case mode == "pcsc":
-		report("ok", "backend", pcscBackendName+" (from YKS_BACKEND)")
-	case mode == "ykman":
-		report("ok", "backend", "ykman (from YKS_BACKEND)")
-	case perr == nil && usbOnly && ykOK:
-		report("ok", "backend", "ykman ("+usbNote+")")
-	case perr == nil && usbOnly:
-		report("FAIL", "backend", "no way to reach this key: "+usbNote+", and ykman is not installed; "+hintYkman)
-	case perr == nil && ykOK:
-		report("ok", "backend", pcscBackendName+", ykman as fallback")
-	case perr == nil:
-		report("ok", "backend", pcscBackendName)
-	default:
-		report("ok", "backend", "ykman")
-	}
-	switch {
-	case ykOK:
+	var slots slotInfo
+	if !haveYkman() {
+		report("FAIL", "ykman", "not found; "+hintYkman)
+	} else {
 		v, _ := ykman("--version").Output()
 		report("ok", "ykman", strings.TrimSpace(string(v)))
-	case usePCSC() && !usbOnly:
-		report("warn", "ykman", "not installed; needed for a YubiKey on USB and to program a slot, not for e/d/c over an NFC reader; "+hintYkman)
-	default:
-		report("FAIL", "ykman", "not found; "+hintYkman)
-	}
-	var slots slotInfo
-	if backendUsable() {
 		keys, err := listYubiKeys()
 		def, src := defaultDevice()
 		target := def
@@ -1080,11 +1034,7 @@ func cmdCheck() error {
 		default:
 			found := false
 			for _, k := range keys {
-				state := "ok"
-				if k.warn {
-					state = "warn"
-				}
-				report(state, "yubikey", k.desc)
+				report("ok", "yubikey", k.desc)
 				found = found || (def != "" && k.serial == def)
 			}
 			switch {

@@ -39,8 +39,8 @@ jobs:
       - name: build
         run: go build -trimpath -ldflags="-s -w" -o yks .
 
-      # The macOS backend loads PCSC.framework at run time (purego), so a
-      # Linux box without a C toolchain must still produce a macOS binary.
+      # Release binaries for macOS are built on Linux without a C toolchain;
+      # the darwin-only files must keep compiling that way.
       - name: cross-compile for macOS without cgo
         if: runner.os == 'Linux'
         run: |

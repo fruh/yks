@@ -41,15 +41,13 @@
 | Dependency | Purpose |
 |---|---|
 | Go ≥ 1.22 | installing / building |
-| `ykman` (YubiKey Manager CLI) | the challenge-response with a YubiKey on **USB**, and programming a slot (once). Only an NFC reader on macOS gets by without it, see below |
+| `ykman` (YubiKey Manager CLI) | the challenge-response with the YubiKey, and programming a slot (once) |
 | `wl-copy`/`wl-paste` (Wayland), `xclip` (X11) or `pbcopy`/`pbpaste` (macOS) | the `c` command only |
 | Linux or macOS | the only supported platforms |
 
-**How `yks` talks to the YubiKey.** The challenge-response slots can be reached two ways. Over **USB**, a YubiKey 5 offers them only through its keyboard interface (HID); that is the path `ykman otp` takes, and `yks` runs `ykman` for it. Over **NFC** (and on the old NEO) the same slots answer on the smart card interface (CCID); on macOS `yks` has a built-in backend for that path, using the system's `PCSC.framework`, so a key on an NFC reader needs no `ykman` at all. `yks` tries the built-in path first and uses `ykman` whenever the key does not answer there, which is the normal case for a key plugged into USB. Both paths give the same response to the same challenge, so a store works unchanged on either. `YKS_BACKEND=pcsc` or `YKS_BACKEND=ykman` forces one; `yks check` shows which is active and why.
-
 **macOS and the keyboard interface.** macOS lets a program open a keyboard-class HID device only if the *app* it runs in has the **Input Monitoring** permission. For `ykman` in a shell that app is your terminal (Terminal, iTerm2, …). Without it, `ykman` prints `WARNING: Failed opening device` several times and gives up. Grant it under System Settings → Privacy & Security → Input Monitoring, then **quit and reopen the terminal app**; a new window or tab is not enough. If the permission prompt never appears, it was dismissed once: `tccutil reset ListenEvent` brings it back on the next attempt.
 
-Install `ykman` (needed for a YubiKey on USB, and to program a slot):
+Install `ykman`:
 
 ```sh
 # Debian/Ubuntu
@@ -147,7 +145,7 @@ Use this to build from a local copy, for example to try changes before pushing, 
 
 ```sh
 go version        # needs go1.22 or newer
-ykman --version   # YubiKey Manager, see Requirements (needed for a YubiKey on USB)
+ykman --version   # YubiKey Manager, see Requirements
 ```
 
 **2. Get the source**
@@ -397,8 +395,8 @@ Before `e`, `d` or `c` does anything else — before asking for a password — `
 
 | Command | Needs |
 |---|---|
-| `e`, `d` | a way to reach the YubiKey: `ykman` for a key on USB, or the built-in backend for an NFC reader (macOS) |
-| `c` | the same, plus a clipboard pair: `wl-copy` + `wl-paste` (Wayland), `xclip` (X11) or `pbcopy` + `pbpaste` (macOS) |
+| `e`, `d` | `ykman` |
+| `c` | `ykman` and a clipboard pair: `wl-copy` + `wl-paste` (Wayland), `xclip` (X11) or `pbcopy` + `pbpaste` (macOS) |
 
 If something is missing, it stops with install instructions:
 
@@ -411,7 +409,6 @@ yks: missing dependencies (run 'yks check' for details):
 
 ```
 $ yks check
-[ok  ] backend    ykman (PC/SC works, but this key offers no OTP application over USB CCID; that is normal for a YubiKey 5 on USB, whose slots are reached through its keyboard interface)
 [ok  ] ykman      YubiKey Manager (ykman) version: 5.5.1
 [ok  ] yubikey    YubiKey 5C NFC (5.4.3) [OTP+FIDO+CCID] Serial: 87654321
 [ok  ] otp        Slot 1: programmed | Slot 2: programmed
@@ -424,8 +421,7 @@ $ yks check
 
 | Check | Fails when | Level |
 |---|---|---|
-| backend | `YKS_BACKEND` is invalid or forces a backend that cannot reach the key, or no backend can (a key on USB with no `ykman` installed); otherwise shows the active backend and why | FAIL |
-| ykman | not installed; a warning only when the built-in backend reaches the key (NFC reader on macOS), since `ykman` is then needed just to program a slot | FAIL / warn |
+| ykman | not installed | FAIL |
 | yubikey | none plugged in, or the key cannot be listed | FAIL |
 | otp | the selected (or only) key's OTP application cannot be read | FAIL |
 | device | the default key (from `-d`, `YKS_DEVICE` or `.config`) is not connected, or several keys are connected with no default | warn |
@@ -441,7 +437,7 @@ $ yks check
 | remote | the store is a git repository without an upstream branch (`yks sync` needs one) | warn |
 | clutter | hidden files or folders other than `.config`, `.gitignore` and `.git` are in the store (for example macOS `._*` files) | warn |
 
-The `otp` line only reports whether a slot is *programmed* (and whether it requires a touch), not whether it holds a challenge-response credential. A slot holding Yubico OTP passes `check`, but decryption then fails with `not configured for HMAC-SHA1 challenge-response` (built-in backend) or `ykman otp calculate failed`.
+The `otp` line only reports whether a slot is *programmed* (and whether it requires a touch), not whether it holds a challenge-response credential. A slot holding Yubico OTP passes `check`, but decryption then fails with `ykman otp calculate failed`.
 
 ### Choosing a YubiKey
 
@@ -619,8 +615,6 @@ Entry names:
 | `YKS_CACHE_TTL` | `300` | Seconds to cache the master key (maximum 86400); `0` turns caching off. Overrides `cache_ttl=` in `.config` |
 | `YKS_DEVICE` | *(none)* | Default YubiKey serial when several are connected; overrides `device=` in `.config`, overridden by `-d` (see [Choosing a YubiKey](#choosing-a-yubikey)) |
 | `YKS_PICKER` | *(auto)* | `plain`: the numbered tree instead of the interactive picker; `tree`: the picker starts in tree view (see [Selecting an entry](#selecting-an-entry-filters-and-the-picker)) |
-| `YKS_BACKEND` | *(auto)* | How to reach the YubiKey: `pcsc` (built in, over the smart card interface through the system PC/SC; macOS only, works over NFC) or `ykman` (needed for a key on USB). By default the built-in backend is used where the key answers on it and `ykman` otherwise, see [Requirements](#requirements) |
-| `YKS_DEBUG` | *(off)* | `1` traces the built-in backend's PC/SC calls on stderr: readers found, connect results, each APDU and status word. Challenge and response bytes are never printed |
 | `YKS_CHALLENGE_ARG` | *(off)* | `1` passes the challenge to `ykman` as a command-line argument (visible in `ps`) instead of on stdin. Only for `ykman` versions that cannot read it from stdin |
 | `YKS_GIT` | *(off)* | `1` commits every change automatically if the store is a git repository, `0` turns it off. Overrides `git=` in `.config` (see [History with git](#history-with-git)) |
 
@@ -898,7 +892,7 @@ Design decisions:
 - **Argon2 parameters are bounded when reading a file** (t ≤ 20, m ≤ 4 GiB, p ≤ 16). A malicious file cannot demand an unreasonable amount of work.
 - **An empty password is allowed**, which leaves the YubiKey as the only factor. This is convenient but weaker.
 
-**The challenge never appears in the process list.** With the built-in backend it goes straight to the key over the smart card interface, inside the process. With `ykman` it is passed on stdin, not as a command-line argument, so it does not appear in `ps` or `/proc/<pid>/cmdline`, and the response comes back over a private pipe. Even if the challenge were visible, it would not weaken the design: it is a one-way function of `pk`, and the response it produces still cannot give the key without `pk`. If your `ykman` cannot read the challenge from stdin, `YKS_CHALLENGE_ARG=1` falls back to passing it as an argument.
+**The challenge is passed to `ykman` on stdin**, not as a command-line argument, so it does not appear in `ps` or `/proc/<pid>/cmdline`. The response comes back over a private pipe. Even if the challenge were visible, it would not weaken the design: it is a one-way function of `pk`, and the response it produces still cannot give the key without `pk`. If your `ykman` cannot read the challenge from stdin, `YKS_CHALLENGE_ARG=1` falls back to passing it as an argument.
 
 ---
 
@@ -1060,10 +1054,6 @@ If a YubiKey or the HMAC secret backup may have been compromised, program a fres
 | Symptom | Cause / fix |
 |---|---|
 | `WARNING: Failed opening device` (from `ykman`, macOS) | `ykman` cannot open the key's keyboard (HID) interface, the only way to the slots over USB. Grant your terminal app *Input Monitoring* (System Settings → Privacy & Security → Input Monitoring), then **quit and reopen the terminal app**; a new window is not enough. No prompt? `tccutil reset ListenEvent`, then retry. Also make sure Yubico Authenticator is not holding the key. See [Requirements](#requirements). |
-| `slot N is empty`, `not configured for HMAC-SHA1 challenge-response`, `touch timed out` | Built-in backend: the slot holds nothing, or something other than a challenge-response credential (see [YubiKey setup](#yubikey-setup)), or you did not touch the key in time. |
-| `yubikey` line in `yks check` is a warning: `SCardConnect: sharing violation` | Built-in backend: another program holds the key's smart card interface exclusively, so neither `yks` nor `ykman` can reach it over CCID. On a Mac that is usually GnuPG's `scdaemon` (`gpgconf --kill scdaemon`, or add `pcsc-shared` to `~/.gnupg/scdaemon.conf` so it shares the card), Yubico Authenticator, or a browser with a WebAuthn tab. Quit it and run `yks check` again. |
-| `OTP application not available over the smart card interface (SW 6A82)` | Normal for a YubiKey 5 on USB: its slots are not offered over CCID, only through the keyboard interface, so `yks` uses `ykman`. You only see this text when `ykman` is missing or `YKS_BACKEND=pcsc` is forced. Over an NFC reader the built-in backend works. |
-| Anything else from the built-in backend | `YKS_DEBUG=1 yks check` prints every PC/SC call and its result (never the challenge or response bytes). |
 | `ykman otp calculate failed` | The slot is not set up for challenge-response (`ykman otp info`), the key is not connected, or the touch timed out. |
 | `no response in ykman output` | Your `ykman` may not read the challenge from stdin. Test it: `head -c 32 /dev/urandom \| xxd -p -c 64 \| ykman otp calculate 1` should print 40 hex characters. If it does not, set `YKS_CHALLENGE_ARG=1`. |
 | `decryption failed after 3 attempts: …` | Wrong password, a different YubiKey or secret, or the file was renamed or moved. Move it back to its original name, decrypt it, then re-encrypt it under the new name. |

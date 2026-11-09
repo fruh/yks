@@ -2,7 +2,9 @@
 
 package main
 
-// The ykman backend: everything that shells out to YubiKey Manager.
+// Talking to the YubiKey: everything that shells out to YubiKey Manager.
+// ykman reaches the challenge-response slots over the key's USB keyboard
+// (HID) interface, the only interface on which a YubiKey 5 performs them.
 
 import (
 	"bytes"
@@ -59,8 +61,8 @@ func exitStderr(err error) string {
 	return ""
 }
 
-// ykmanList parses `ykman list`.
-func ykmanList() ([]yubikey, error) {
+// listYubiKeys parses `ykman list`.
+func listYubiKeys() ([]yubikey, error) {
 	out, err := exec.Command("ykman", "list").Output()
 	if err != nil {
 		if s := exitStderr(err); s != "" {
@@ -82,8 +84,14 @@ func ykmanList() ([]yubikey, error) {
 	return keys, nil
 }
 
-// ykmanSlotInfo parses `ykman otp info` ("Slot 1: programmed", "Slot 2: empty").
-func ykmanSlotInfo(dev string) (slotInfo, error) {
+// slotInfo is what `yks check` shows about one key's OTP slots.
+type slotInfo struct {
+	text  string
+	empty [3]bool // indexed by slot
+}
+
+// otpSlots parses `ykman otp info` ("Slot 1: programmed", "Slot 2: empty").
+func otpSlots(dev string) (slotInfo, error) {
 	out, err := ykmanOn(dev, "otp", "info").CombinedOutput()
 	text := strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSpace(string(out)), "\n", " | ")), " ")
 	if err != nil {
@@ -100,13 +108,21 @@ func ykmanSlotInfo(dev string) (slotInfo, error) {
 	return info, nil
 }
 
-// ykmanChallenge runs `ykman [--device SERIAL] otp calculate <slot>` and
-// writes the challenge to its stdin, where ykman's challenge prompt reads it.
-// Nothing secret-derived appears in the process list (ps, /proc/<pid>/cmdline).
+// challengeResponse runs `ykman [--device SERIAL] otp calculate <slot>` on
+// the YubiKey dev ("" = YKS_DEVICE / .config / the only one; asks if several)
+// and writes the challenge to its stdin, where ykman's challenge prompt reads
+// it. Nothing secret-derived appears in the process list (ps, /proc/<pid>/cmdline).
 // YKS_CHALLENGE_ARG=1 passes the challenge as an argument instead, for ykman
 // versions that cannot read it from stdin. That exposure is harmless in this
 // design (the challenge is a one-way function of pk) but avoided by default.
-func ykmanChallenge(slot int, chal []byte, dev string) ([]byte, error) {
+func challengeResponse(slot int, chal []byte, dev string) ([]byte, error) {
+	if dev == "" {
+		d, err := device()
+		if err != nil {
+			return nil, err
+		}
+		dev = d
+	}
 	hexChal := hex.EncodeToString(chal)
 	args := []string{"otp", "calculate", strconv.Itoa(slot)}
 	viaArg := os.Getenv("YKS_CHALLENGE_ARG") == "1"
@@ -147,4 +163,21 @@ func (f promptFilter) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+const hintInputMonitoring = "On macOS the YubiKey's keyboard (HID) interface, the only way to its slots over USB, " +
+	"needs the Input Monitoring permission for your terminal app (System Settings > Privacy & Security > Input Monitoring). " +
+	"After granting it, quit and reopen the terminal app; a new window is not enough. " +
+	"If no prompt ever appeared, 'tccutil reset ListenEvent' brings it back."
+
+// hidHint adds the macOS explanation when ykman's output shows it could
+// not open the YubiKey's HID interface. goos is a parameter for testing.
+func hidHint(err error, output, goos string) error {
+	if err == nil || goos != "darwin" {
+		return err
+	}
+	if !strings.Contains(output, "Failed opening device") && !strings.Contains(output, "Failed to connect to the device") {
+		return err
+	}
+	return fmt.Errorf("%w\n  ykman could not open the YubiKey's keyboard interface. %s", err, hintInputMonitoring)
 }

@@ -19,8 +19,7 @@ var flagDevice string // set from -d / --device
 
 type yubikey struct {
 	serial string // empty if the key does not report one
-	desc   string // one line shown when asking which key to use
-	warn   bool   // connected but not usable; desc says why
+	desc   string // the line from `ykman list`
 }
 
 func validSerial(s string) bool {
@@ -73,7 +72,7 @@ func device() (string, error) {
 		switch len(keys) {
 		case 0:
 			return "", errors.New("no YubiKey detected: plug one in")
-		case 1: // the backend picks it; no serial needed
+		case 1: // ykman picks it; no --device needed
 		default:
 			if d, err = pickYubiKey(keys, false); err != nil {
 				return "", err
